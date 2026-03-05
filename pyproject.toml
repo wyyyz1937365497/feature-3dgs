@@ -1,0 +1,55 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "feature-3dgs"
+version = "0.1.0"
+description = "3D Gaussian Splatting with semantic feature support and text-guided editing"
+readme = "README.md"
+requires-python = ">=3.8"
+license = {text = "Apache-2.0"}
+authors = [
+    {name = "Feature-3DGS Contributors"},
+]
+keywords = ["3dgs", "gaussian-splatting", "nerf", "nerfstudio", "semantic-features"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+]
+
+dependencies = [
+    "nerfstudio>=1.0.0",
+    "gsplat>=1.0.0",
+    "torch>=1.13.0",
+    "torchvision>=0.14.0",
+    "pytorch-msssim",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "black",
+    "isort",
+    "flake8",
+]
+
+[project.urls]
+Homepage = "https://github.com/your-org/feature-3dgs"
+Documentation = "https://github.com/your-org/feature-3dgs#readme"
+Repository = "https://github.com/your-org/feature-3dgs"
+
+[tool.setuptools.packages.find]
+include = ["feature_3dgs*"]
+
+[project.entry-points.'nerfstudio.method_configs']
+feature-3dgs = 'feature_3dgs.feature_3dgs_configs:feature_3dgs'
+feature-3dgs-speedup = 'feature_3dgs.feature_3dgs_configs:feature_3dgs_speedup'
+
+[project.entry-points.'nerfstudio.dataparser_configs']
+semantic-feature = 'feature_3dgs.feature_3dgs_configs:semantic_feature_dataparser'

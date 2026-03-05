@@ -18,20 +18,20 @@ def test_imports():
     sys.path.insert(0, str(project_root))
 
     try:
-        from feature_3dgs_extension.models.feature_3dgs import (
+        from feature_3dgs.feature_3dgs import (
             Feature3DGSModel,
             Feature3DGSModelConfig,
             CNNDecoder,
         )
         print("  [green]✓[/green] Models imported successfully")
 
-        from feature_3dgs_extension.data.dataparsers.semantic_feature_dataparser import (
+        from feature_3dgs.dataparsers.semantic_feature_dataparser import (
             SemanticFeatureDataparser,
             SemanticFeatureDataparserConfig,
         )
         print("  [green]✓[/green] Dataparser imported successfully")
 
-        from feature_3dgs_extension.data.datasets.semantic_feature_dataset import (
+        from feature_3dgs.datasets.semantic_feature_dataset import (
             SemanticFeatureDataset,
         )
         print("  [green]✓[/green] Dataset imported successfully")
@@ -95,7 +95,7 @@ def test_dataparser_config():
     print("\nTesting dataparser configuration...")
 
     try:
-        from feature_3dgs_extension.data.dataparsers.semantic_feature_dataparser import (
+        from feature_3dgs.dataparsers.semantic_feature_dataparser import (
             SemanticFeatureDataparserConfig,
         )
 
@@ -141,10 +141,10 @@ def test_file_structure():
 
     project_root = Path(__file__).parent.parent
     required_files = [
-        "feature_3dgs_extension/models/feature_3dgs.py",
-        "feature_3dgs_extension/data/dataparsers/semantic_feature_dataparser.py",
-        "feature_3dgs_extension/data/datasets/semantic_feature_dataset.py",
-        "feature_3dgs_extension/configs/feature_3dgs_configs.py",
+        "feature_3dgs/feature_3dgs.py",
+        "feature_3dgs/dataparsers/semantic_feature_dataparser.py",
+        "feature_3dgs/datasets/semantic_feature_dataset.py",
+        "feature_3dgs/feature_3dgs_configs.py",
     ]
 
     all_exist = True

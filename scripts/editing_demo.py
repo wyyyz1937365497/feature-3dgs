@@ -119,7 +119,7 @@ def main():
     # Load model
     print(f"Loading model from {args.checkpoint}...")
     try:
-        from feature_3dgs_extension.models.feature_3dgs import Feature3DGSModel
+        from feature_3dgs.feature_3dgs import Feature3DGSModel
 
         # This is a simplified loading - adjust based on actual checkpoint format
         checkpoint = torch.load(args.checkpoint, map_location=device)
