@@ -3,6 +3,7 @@ import torch.nn as nn
 import timm
 import types
 import math
+import threading
 import torch.nn.functional as F
 import clip
 import os
@@ -10,11 +11,23 @@ os.environ["TORCH_MODEL_ZOO"] = "/tmp/torch/"
 os.environ["TORCH_HOME"] = "/tmp/torch/"
 
 activations = {}
+_thread_local_activations = threading.local()
 
 
-def get_activation(name):
+def _get_thread_activations():
+    activations_map = getattr(_thread_local_activations, "map", None)
+    if activations_map is None:
+        activations_map = {}
+        _thread_local_activations.map = activations_map
+    return activations_map
+
+
+def get_activation(name, activation_store=None):
     def hook(model, input, output):
-        activations[name] = output
+        if activation_store is None:
+            _get_thread_activations()[name] = output
+        else:
+            activation_store[name] = output
 
     return hook
 
@@ -106,6 +119,7 @@ class Transpose(nn.Module):
 
 def forward_vit(pretrained, x, preresize=None):
     b, c, h, w = x.shape
+    _get_thread_activations().clear()
     
     # encoder
     # print(x.shape, "x.shape")
@@ -121,10 +135,11 @@ def forward_vit(pretrained, x, preresize=None):
     else:
         glob = pretrained.model.forward_flex(x)
 
-    layer_1 = pretrained.activations["1"]
-    layer_2 = pretrained.activations["2"]
-    layer_3 = pretrained.activations["3"]
-    layer_4 = pretrained.activations["4"]
+    activation_store = _get_thread_activations()
+    layer_1 = activation_store["1"]
+    layer_2 = activation_store["2"]
+    layer_3 = activation_store["3"]
+    layer_4 = activation_store["4"]
     # print(x.shape)# torch.Size([1, 3, 480, 480])
 
     #print(layer_1.shape)
@@ -467,12 +482,11 @@ def _make_vit_b32_backbone(
     pretrained = nn.Module()
     
     pretrained.model = model
+    pretrained.activations = activations
     pretrained.model.blocks[hooks[0]].register_forward_hook(get_activation("1"))
     pretrained.model.blocks[hooks[1]].register_forward_hook(get_activation("2"))
     pretrained.model.blocks[hooks[2]].register_forward_hook(get_activation("3"))
     pretrained.model.blocks[hooks[3]].register_forward_hook(get_activation("4"))
-
-    pretrained.activations = activations
 
     pretrained.model.patch_size = [32, 32]
     pretrained.model.start_index = start_index
@@ -600,12 +614,11 @@ def _make_vit_b16_backbone(
     pretrained = nn.Module()
 
     pretrained.model = model
+    pretrained.activations = activations
     pretrained.model.blocks[hooks[0]].register_forward_hook(get_activation("1"))
     pretrained.model.blocks[hooks[1]].register_forward_hook(get_activation("2"))
     pretrained.model.blocks[hooks[2]].register_forward_hook(get_activation("3"))
     pretrained.model.blocks[hooks[3]].register_forward_hook(get_activation("4"))
-
-    pretrained.activations = activations
 
     if enable_attention_hooks:
         pretrained.model.blocks[hooks[0]].attn.register_forward_hook(
@@ -731,6 +744,7 @@ def _make_clipvisual_vit_l14_backbone(
     pretrained = nn.Module()
 
     pretrained.model = model
+    pretrained.activations = activations
     """
     pretrained.model.blocks[hooks[0]].register_forward_hook(get_activation("1"))
     pretrained.model.blocks[hooks[1]].register_forward_hook(get_activation("2"))
@@ -745,8 +759,6 @@ def _make_clipvisual_vit_l14_backbone(
             i += 1
             print(i, str(block)[:50] + "...")
     assert i == len(hooks) + 1, (i, hooks)
-
-    pretrained.activations = activations
 
     assert not enable_attention_hooks
     """

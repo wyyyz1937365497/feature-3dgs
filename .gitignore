@@ -9,5 +9,9 @@ tensorboard_3d
 screenshots
 *.ckpt
 *.pth
-data
+# Ignore data directory but allow feature_3dgs_extension/data
+data/
 data_scannet
+!feature_3dgs_extension/data/
+*.dump
+.claude/

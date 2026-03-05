@@ -10,6 +10,7 @@ import torch.nn.functional as F
 from torch.nn.parallel.data_parallel import DataParallel
 from torch.nn.parallel.scatter_gather import scatter
 import threading
+import types
 import torch
 from torch.cuda._utils import _get_device_index
 from torch.cuda.amp import autocast
@@ -19,6 +20,22 @@ up_kwargs = {'mode': 'bilinear', 'align_corners': True}
 # up_kwargs = {'mode': 'bilinear', 'align_corners': False}
 
 __all__ = ['MultiEvalModule']
+
+
+def _rebind_bound_method(module_obj, method_name):
+    method = getattr(module_obj, method_name, None)
+    if method is None:
+        return
+    method_func = getattr(method, '__func__', None)
+    method_self = getattr(method, '__self__', None)
+    if method_func is not None and method_self is not module_obj:
+        setattr(module_obj, method_name, types.MethodType(method_func, module_obj))
+
+
+def _fix_replica_monkey_patched_methods(model_replica):
+    for submodule in model_replica.modules():
+        _rebind_bound_method(submodule, 'forward_flex')
+        _rebind_bound_method(submodule, '_resize_pos_embed')
 
 class MultiEvalModule(DataParallel):
     """Multi-size Segmentation Eavluator"""
@@ -39,33 +56,38 @@ class MultiEvalModule(DataParallel):
         Args:
             inputs: list of Tensors
         """
-        inputs = [(input.unsqueeze(0).cuda(device),)
-                  for input, device in zip(inputs, self.device_ids)]
-        replicas = self.replicate(self, self.device_ids[:len(inputs)])
-        # kwargs = scatter(kwargs, target_gpus, dim) if kwargs else []
-        # no target_gpus variable
-        if len(inputs) < len(kwargs):
-            inputs.extend([() for _ in range(len(kwargs) - len(inputs))])
-        elif len(kwargs) < len(inputs):
-            # print(kwargs)
-            kwargs = [kwargs]
-            # print(kwargs)
-            # kwargs.extend([{} for _ in range(len(inputs) - len(kwargs))])
-            # kwargs.update([{} for _ in range(len(inputs) - len(kwargs))])
-            # print(len(inputs), len(kwargs), "---")
-            # kwargs = [kwargs for _ in range(len(inputs) - len(kwargs))]
+        if not inputs:
+            return []
 
-            #{}
-            #[0]
-            #1 1
-            #1 1 ---
+        device_ids = self.device_ids[:len(inputs)]
+
+        # 1) 准备输入数据
+        inputs = [(input.unsqueeze(0).to(device, non_blocking=True),)
+                  for input, device in zip(inputs, device_ids)]
+
+        # 2) 复制 MultiEval 包装器
+        replicas = self.replicate(self, device_ids)
+
+        # 3) 单独复制底层模型，并显式替换到每个包装器副本上
+        #    避免某些版本下 replicate(self) 时 self.module 仍指向 cuda:0 权重
+        module_replicas = self.replicate(self.module, device_ids)
+        for replica, module_replica, device in zip(replicas, module_replicas, device_ids):
+            _fix_replica_monkey_patched_methods(module_replica)
+            replica.module = module_replica
+            replica.device_ids = [device]
+            replica.output_device = device
+
+        # 4) 准备 kwargs
+        if kwargs:
+            kwargs = [dict(kwargs) for _ in range(len(inputs))]
         else:
-            kwargs = [kwargs]
-        outputs = self.parallel_apply(replicas, inputs, kwargs)
-        #for out in outputs:
-        #    print('out.size()', out.size())
-        return outputs
+            kwargs = [{} for _ in range(len(inputs))]
 
+        # 5) 并行执行
+        outputs = self.parallel_apply(replicas, inputs, kwargs)
+        
+        return outputs
+    
     def forward(self, image, return_feature=False):
         """Mult-size Evaluation"""
         # only single image is supported for evaluation

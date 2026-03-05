@@ -493,8 +493,8 @@ def test(args):
                 print(pca)
                 print("pca.explained_variance_ratio_", pca.explained_variance_ratio_.tolist())
                 print("pca.singular_values_", pca.singular_values_.tolist())
-                feature_pca_mean = torch.tensor(f_samples.mean(0)).float().cuda()
-                feature_pca_components = torch.tensor(pca.components_).float().cuda()
+                feature_pca_mean = torch.tensor(f_samples.mean(0)).float()
+                feature_pca_components = torch.tensor(pca.components_).float()
                 q1, q99 = np.percentile(transformed, [1, 99])
                 feature_pca_postprocess_sub = q1
                 feature_pca_postprocess_div = (q99 - q1)
@@ -506,7 +506,9 @@ def test(args):
 
             #print("start imgsave")
             start = time.time()
-            vis_feature = (fmap.permute(0, 2, 3, 1).reshape(-1, fmap.shape[1]) - feature_pca_mean[None, :]) @ feature_pca_components.T
+            pca_mean = feature_pca_mean.to(fmap.device, non_blocking=True)
+            pca_components = feature_pca_components.to(fmap.device, non_blocking=True)
+            vis_feature = (fmap.permute(0, 2, 3, 1).reshape(-1, fmap.shape[1]) - pca_mean[None, :]) @ pca_components.T
             vis_feature = (vis_feature - feature_pca_postprocess_sub) / feature_pca_postprocess_div
             vis_feature = vis_feature.clamp(0.0, 1.0).float().reshape((fmap.shape[2], fmap.shape[3], 3)).cpu()
             Image.fromarray((vis_feature.cpu().numpy() * 255).astype(np.uint8)).save(os.path.join(outdir, outname + "_feature_vis.png"))
