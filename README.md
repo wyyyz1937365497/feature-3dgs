@@ -369,6 +369,135 @@ python view.py -s <path to COLMAP or NeRF Synthetic dataset> -m <path to trained
 </details>
 <br>
 
+---
+
+# Training with Nerfstudio
+
+We also provide a nerfstudio-based implementation that offers a more modular and efficient training pipeline for feature-3dgs. This integration leverages nerfstudio's infrastructure while maintaining all the core functionality of feature-3dgs.
+
+## Installation
+
+### 1. Install nerfstudio
+
+```bash
+pip install nerfstudio
+```
+
+### 2. Install dependencies
+
+```bash
+pip install gsplat>=1.0.0
+```
+
+### 3. Clone with submodules
+
+```bash
+git clone --recursive https://github.com/your-repo/feature-3dgs.git
+cd feature-3dgs
+```
+
+If you already cloned without `--recursive`, run:
+
+```bash
+git submodule update --init --recursive
+```
+
+## Quick Start
+
+### 1. Pre-compute Semantic Features
+
+Extract semantic features from your images using LSeg or SAM:
+
+```bash
+python scripts/precompute_semantic_features.py \
+    --data data/DATASET_NAME \
+    --output data/DATASET_NAME/features \
+    --model lseg \
+    --resize 480 640
+```
+
+This creates `.pt` files containing semantic features for each image.
+
+### 2. Register the Method
+
+Register feature-3dgs with your nerfstudio installation:
+
+```bash
+python scripts/register_feature_3dgs.py
+```
+
+Or manually add to your nerfstudio's `method_configs.py`:
+
+```python
+import sys
+from pathlib import Path
+sys.path.insert(0, "path/to/feature-3dgs")
+
+from feature_3dgs_extension.configs.feature_3dgs_configs import register_feature_3dgs_configs
+register_feature_3dgs_configs(method_configs, descriptions)
+```
+
+### 3. Train the Model
+
+```bash
+# Standard training
+ns-train feature-3dgs \
+    --data data/DATASET_NAME \
+    --output-dir outputs/feature_3dgs_model
+
+# Speedup mode (faster training with CNN decoder)
+ns-train feature-3dgs-speedup \
+    --data data/DATASET_NAME \
+    --output-dir outputs/feature_3dgs_speedup
+```
+
+### 4. Text-Guided Editing
+
+```bash
+python scripts/editing_demo.py \
+    --checkpoint outputs/feature_3dgs_model/nerfstudio_models/ \
+    --text "chair" \
+    --operation deletion \
+    --output edited_output.png
+```
+
+## Configuration Options
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `--semantic-feature-dim` | 512 | Dimension of semantic features |
+| `--semantic-loss-weight` | 1.0 | Weight for semantic loss |
+| `--use-speedup` | False | Enable CNN decoder for faster training |
+| `--enable-editing` | True | Enable text-guided editing |
+
+## Project Structure
+
+```
+feature-3dgs/
+├── feature_3dgs_extension/        # Extension module
+│   ├── models/
+│   │   └── feature_3dgs.py       # Core model
+│   ├── data/
+│   │   ├── dataparsers/
+│   │   │   └── semantic_feature_dataparser.py
+│   │   └── datasets/
+│   │       └── semantic_feature_dataset.py
+│   └── configs/
+│       └── feature_3dgs_configs.py
+├── third_party/
+│   └── nerfstudio/               # Git submodule
+├── scripts/                       # Utility scripts
+└── nerfstudio_integration/        # Documentation
+```
+
+## See Also
+
+- [Quick Start Guide](nerfstudio_integration/QUICKSTART.md)
+- [Implementation Summary](nerfstudio_integration/IMPLEMENTATION_SUMMARY.md)
+- [Full Documentation](nerfstudio_integration/README.md)
+
+---
+
 ## Render
 1. Render from training and test views:
 ```
