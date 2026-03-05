@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Dict, Optional, Tuple
 
 import torch
-from nerfstudio.data.datasets.image_dataset import ImageDataset
+from nerfstudio.data.datasets.base_dataset import InputDataset as ImageDataset
 from rich.console import Console
 
 CONSOLE = Console(width=120)

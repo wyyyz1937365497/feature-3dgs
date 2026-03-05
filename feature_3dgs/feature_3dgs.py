@@ -48,13 +48,12 @@ from nerfstudio.models.splatfacto import (
     SplatfactoModel,
     SplatfactoModelConfig,
     num_sh_bases,
-    quat_to_rotmat,
-    random_quat_tensor,
     RGB2SH,
     SH2RGB,
     get_viewmat,
     resize_image,
 )
+from nerfstudio.utils.math import random_quat_tensor
 from nerfstudio.utils.colors import get_color
 from nerfstudio.utils.misc import torch_compile
 from nerfstudio.utils.rich_utils import CONSOLE

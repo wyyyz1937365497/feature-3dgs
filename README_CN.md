@@ -457,30 +457,36 @@ python segment_time.py --checkpoint checkpoints/sam_vit_h_4b8939.pth --model-typ
 
 ## 安装
 
-### 1. 安装 nerfstudio
+### 1. 创建环境
 
 ```bash
-pip install nerfstudio
+conda create -n feature-3dgs python=3.10
+conda activate feature-3dgs
 ```
 
 ### 2. 安装依赖
 
 ```bash
+pip install nerfstudio
 pip install gsplat>=1.0.0
 ```
 
-### 3. 克隆并包含子模块
+### 3. 安装 feature-3dgs
 
 ```bash
-git clone --recursive https://github.com/your-repo/feature-3dgs.git
 cd feature-3dgs
+pip install -e .
 ```
 
-如果您已经克隆但没有使用 `--recursive`，请运行：
+这将自动注册 `feature-3dgs` 和 `feature-3dgs-speedup` 方法到 nerfstudio。
+
+### 4. 验证安装
 
 ```bash
-git submodule update --init --recursive
+ns-train --help
 ```
+
+在输出中应该能看到 `feature-3dgs` 和 `feature-3dgs-speedup` 选项。
 
 ## 快速开始
 
@@ -498,40 +504,17 @@ python scripts/precompute_semantic_features.py \
 
 这将创建包含每张图像语义特征的 `.pt` 文件。
 
-### 2. 注册方法
-
-将 feature-3dgs 注册到您的 nerfstudio 安装中：
+### 2. 训练模型
 
 ```bash
-python scripts/register_feature_3dgs.py
-```
-
-或者手动添加到 nerfstudio 的 `method_configs.py` 中：
-
-```python
-import sys
-from pathlib import Path
-sys.path.insert(0, "path/to/feature-3dgs")
-
-from feature_3dgs_extension.configs.feature_3dgs_configs import register_feature_3dgs_configs
-register_feature_3dgs_configs(method_configs, descriptions)
-```
-
-### 3. 训练模型
-
-```bash
-# 标准训练
-ns-train feature-3dgs \
-    --data data/DATASET_NAME \
-    --output-dir outputs/feature_3dgs_model
+# 标准训练（语义特征维度 512）
+ns-train feature-3dgs --data data/DATASET_NAME
 
 # 加速模式（使用 CNN 解码器加快训练速度）
-ns-train feature-3dgs-speedup \
-    --data data/DATASET_NAME \
-    --output-dir outputs/feature_3dgs_speedup
+ns-train feature-3dgs-speedup --data data/DATASET_NAME
 ```
 
-### 4. 文本引导编辑
+### 3. 文本引导编辑
 
 ```bash
 python scripts/editing_demo.py \
@@ -545,36 +528,25 @@ python scripts/editing_demo.py \
 
 | 参数 | 默认值 | 描述 |
 |-----------|---------|-------------|
-| `--semantic-feature-dim` | 512 | 语义特征维度 |
-| `--semantic-loss-weight` | 1.0 | 语义损失权重 |
-| `--use-speedup` | False | 启用 CNN 解码器以加快训练 |
-| `--enable-editing` | True | 启用文本引导编辑 |
+| `semantic_feature_dim` | 512 | 语义特征维度 |
+| `semantic_loss_weight` | 1.0 | 语义损失权重 |
+| `use_speedup` | False | 启用 CNN 解码器以加快训练 |
+| `enable_editing` | True | 启用文本引导编辑 |
 
 ## 项目结构
 
 ```
 feature-3dgs/
-├── feature_3dgs_extension/        # 扩展模块
-│   ├── models/
-│   │   └── feature_3dgs.py       # 核心模型
-│   ├── data/
-│   │   ├── dataparsers/
-│   │   │   └── semantic_feature_dataparser.py
-│   │   └── datasets/
-│   │       └── semantic_feature_dataset.py
-│   └── configs/
-│       └── feature_3dgs_configs.py
+├── feature_3dgs/               # 主模块
+│   ├── feature_3dgs.py         # 核心模型
+│   ├── feature_3dgs_configs.py # 方法配置
+│   ├── dataparsers/            # 数据解析器
+│   └── datasets/               # 数据集
+├── scripts/                    # 实用脚本
 ├── third_party/
-│   └── nerfstudio/               # Git 子模块
-├── scripts/                       # 实用脚本
-└── nerfstudio_integration/        # 文档
+│   └── nerfstudio/             # Git 子模块（参考）
+└── pyproject.toml              # 包配置
 ```
-
-## 相关文档
-
-- [快速入门指南](nerfstudio_integration/QUICKSTART.md)
-- [实现总结](nerfstudio_integration/IMPLEMENTATION_SUMMARY.md)
-- [完整文档](nerfstudio_integration/README.md)
 
 ## 致谢
 我们的代码库基于 [3D Gaussian Splatting](https://repo-sam.inria.fr/fungraph/3d-gaussian-splatting/)、[DFFs](https://github.com/pfnet-research/distilled-feature-fields) 和 [Segment Anything](https://github.com/facebookresearch/segment-anything) 开发。非常感谢作者开源代码库。

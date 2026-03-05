@@ -1,0 +1,6 @@
+[nerfstudio.dataparser_configs]
+semantic-feature = feature_3dgs.feature_3dgs_configs:semantic_feature_dataparser
+
+[nerfstudio.method_configs]
+feature-3dgs = feature_3dgs.feature_3dgs_configs:feature_3dgs
+feature-3dgs-speedup = feature_3dgs.feature_3dgs_configs:feature_3dgs_speedup

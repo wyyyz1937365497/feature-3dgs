@@ -21,7 +21,7 @@ from typing import Dict, List, Optional, Tuple, Type
 import torch
 from nerfstudio.data.dataparsers.base_dataparser import DataparserOutputs
 from nerfstudio.data.dataparsers.nerfstudio_dataparser import (
-    NerfstudioDataParser,
+    Nerfstudio,
     NerfstudioDataParserConfig,
 )
 from nerfstudio.data.scene_box import SceneBox
@@ -61,8 +61,8 @@ class SemanticFeatureDataparserOutputs(DataparserOutputs):
     """Mapping from image filename to semantic feature tensor."""
 
 
-class SemanticFeatureDataparser(NerfstudioDataParser):
-    """Semantic feature dataparser that extends NerfstudioDataParser.
+class SemanticFeatureDataparser(Nerfstudio):
+    """Semantic feature dataparser that extends Nerfstudio.
 
     This dataparser loads pre-computed semantic features for each training image
     and includes them in the metadata for the model to use during training.

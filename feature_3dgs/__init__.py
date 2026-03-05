@@ -19,30 +19,3 @@ This package extends nerfstudio with semantic feature rendering and text-guided 
 """
 
 __version__ = "0.1.0"
-
-# Import main components
-from feature_3dgs.feature_3dgs import (
-    Feature3DGSModel,
-    Feature3DGSModelConfig,
-    CNNDecoder,
-)
-from feature_3dgs.dataparsers.semantic_feature_dataparser import (
-    SemanticFeatureDataparser,
-    SemanticFeatureDataparserConfig,
-    SemanticFeatureDataparserOutputs,
-)
-from feature_3dgs.datasets.semantic_feature_dataset import (
-    SemanticFeatureDataset,
-    SemanticFeatureDepthDataset,
-)
-
-__all__ = [
-    "Feature3DGSModel",
-    "Feature3DGSModelConfig",
-    "CNNDecoder",
-    "SemanticFeatureDataparser",
-    "SemanticFeatureDataparserConfig",
-    "SemanticFeatureDataparserOutputs",
-    "SemanticFeatureDataset",
-    "SemanticFeatureDepthDataset",
-]

@@ -1,0 +1,16 @@
+LICENSE.md
+README.md
+pyproject.toml
+feature_3dgs/__init__.py
+feature_3dgs/feature_3dgs.py
+feature_3dgs/feature_3dgs_configs.py
+feature_3dgs.egg-info/PKG-INFO
+feature_3dgs.egg-info/SOURCES.txt
+feature_3dgs.egg-info/dependency_links.txt
+feature_3dgs.egg-info/entry_points.txt
+feature_3dgs.egg-info/requires.txt
+feature_3dgs.egg-info/top_level.txt
+feature_3dgs/dataparsers/__init__.py
+feature_3dgs/dataparsers/semantic_feature_dataparser.py
+feature_3dgs/datasets/__init__.py
+feature_3dgs/datasets/semantic_feature_dataset.py

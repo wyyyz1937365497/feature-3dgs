@@ -11,15 +11,3 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
-from feature_3dgs.dataparsers.semantic_feature_dataparser import (
-    SemanticFeatureDataparser,
-    SemanticFeatureDataparserConfig,
-    SemanticFeatureDataparserOutputs,
-)
-
-__all__ = [
-    "SemanticFeatureDataparser",
-    "SemanticFeatureDataparserConfig",
-    "SemanticFeatureDataparserOutputs",
-]
