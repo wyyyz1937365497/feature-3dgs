@@ -52,7 +52,7 @@ def feature_3dgs():
                     cache_images_type="uint8",
                 ),
                 model=Feature3DGSModelConfig(
-                    semantic_feature_dim=256,  # LSeg demo_e200.ckpt uses 256
+                    semantic_feature_dim=512,  # Official LSeg output: 512 channels
                     use_semantic_features=True,
                     semantic_loss_weight=1.0,
                     use_speedup=False,
@@ -136,7 +136,7 @@ def feature_3dgs_speedup():
                     cache_images_type="uint8",
                 ),
                 model=Feature3DGSModelConfig(
-                    semantic_feature_dim=256,  # LSeg demo_e200.ckpt uses 256
+                    semantic_feature_dim=512,  # Official LSeg output: 512 channels
                     use_semantic_features=True,
                     semantic_loss_weight=1.0,
                     use_speedup=True,  # Enable CNN decoder for faster training

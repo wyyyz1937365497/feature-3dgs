@@ -30,7 +30,9 @@ from pathlib import Path
 from typing import Dict, List, Literal, Optional, Tuple, Type
 
 import numpy as np
+import os
 import torch
+from PIL import Image
 from rich.console import Console
 
 from nerfstudio.data.dataparsers.base_dataparser import DataParser, DataParserConfig, DataparserOutputs
@@ -70,8 +72,8 @@ class Feature3DGSDataparserConfig(DataParserConfig):
     feature_output_dir: Optional[str] = None
     """特征输出目录（默认为 data/FEATURES）"""
 
-    feature_dim: int = 256
-    """语义特征维度（LSeg=256, SAM=256）"""
+    feature_dim: int = 512
+    """语义特征维度（LSeg=512 官方格式, SAM=256）"""
 
     # LSeg 配置
     lseg_weights: Optional[Path] = None
@@ -197,12 +199,18 @@ class Feature3DGSDataparser(DataParser):
             self._extract_sam_features(image_filenames, feature_dir)
 
     def _extract_lseg_features(self, image_filenames: List[Path], feature_dir: Path) -> None:
-        """使用 LSeg 提取特征
+        """使用 LSeg 提取特征（基于官方 encode_images_visfeature.py）
 
         Args:
             image_filenames: 图像文件名列表
             feature_dir: 特征输出目录
         """
+        import sys
+        import torch
+        import torch.nn.functional as F
+        import torchvision.transforms as transforms
+        from tqdm import tqdm
+
         # 确定 LSeg 权重路径
         if self.config.lseg_weights is None:
             lseg_weights = Path("encoders/lseg_encoder/demo_e200.ckpt")
@@ -215,7 +223,6 @@ class Feature3DGSDataparser(DataParser):
             return
 
         # 获取项目根目录和 lseg_encoder 路径
-        import sys
         project_root = Path.cwd().resolve()
         lseg_encoder_dir = (project_root / "encoders" / "lseg_encoder").resolve()
         weights_path = lseg_weights.resolve() if not lseg_weights.is_absolute() else lseg_weights
@@ -228,12 +235,17 @@ class Feature3DGSDataparser(DataParser):
         if parent_dir not in sys.path:
             sys.path.append(parent_dir)
 
-        # 导入 LSeg 模块
+        # 设置环境变量
+        os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
+
+        # 导入 LSeg 模块 - 使用官方参数
         try:
             from modules.lseg_module import LSegModule
+            from additional_utils.encoding_models import MultiEvalModule as LSeg_MultiEvalModule
 
             CONSOLE.print(f"  Loading LSeg model from {weights_path}...")
-            # 注意：demo_e200.ckpt 使用 num_features=256 训练
+
+            # 官方参数设置
             module = LSegModule.load_from_checkpoint(
                 checkpoint_path=str(weights_path),
                 data_path=str(lseg_encoder_dir),
@@ -248,36 +260,46 @@ class Feature3DGSDataparser(DataParser):
                 batch_size=1,
                 max_epochs=0,
                 ignore_index=255,
-                scale_inv=False,
+                dropout=0.0,
+                scale_inv=True,  # 官方设置
+                augment=False,
+                no_batchnorm=False,
                 widehead=True,
                 widehead_hr=False,
                 arch_option=0,
+                strict=True,
                 block_depth=0,
                 activation="lrelu",
             )
+
             module = module.to(self.config.device)
             module.eval()
+
+            # 创建 MultiEvalModule - 官方的多尺度设置
+            labels = module.get_labels('ade20k')
+            num_classes = len(labels)
+            scales = [0.75, 1.0, 1.25, 1.75]  # 官方设置
+
+            evaluator = LSeg_MultiEvalModule(
+                module.net, num_classes, scales=scales, flip=True
+            ).to(self.config.device)
+            evaluator.eval()
+
             CONSOLE.print("  [green]✓ LSeg model loaded[/green]")
 
         except Exception as e:
             CONSOLE.print(f"[bold red]Error loading LSeg: {e}[/bold red]")
+            import traceback
+            traceback.print_exc()
             return
 
-        # 准备 transform
-        from torchvision import transforms
-        transform = transforms.Compose([
-            transforms.Resize((512, 512), interpolation=Image.BICUBIC),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]),
-        ])
+        # 默认输出尺寸
+        default_h, default_w = 480, 360
 
         # 提取特征
-        from tqdm import tqdm
-        import torch.nn.functional as F
-
         for img_path in tqdm(image_filenames, desc="  Extracting LSeg features"):
-            # 确定特征文件路径
-            feature_path = feature_dir / f"{img_path.stem}.pt"
+            # 官方格式特征文件名：{filename}_fmap_CxHxW.pt
+            feature_path = feature_dir / f"{img_path.stem}_fmap_CxHxW.pt"
 
             # 跳过已存在的特征
             if self.config.skip_existing and feature_path.exists():
@@ -288,46 +310,63 @@ class Feature3DGSDataparser(DataParser):
                 except:
                     pass
 
-            # 加载并处理图像
-            img = Image.open(img_path).convert("RGB")
+            try:
+                # 加载图像
+                img = Image.open(img_path).convert("RGB")
 
-            # 调整大小
-            if self.config.feature_resize is not None:
-                img = img.resize(
-                    (self.config.feature_resize[1], self.config.feature_resize[0]),
-                    Image.BILINEAR
-                )
+                # 使用官方的 transform
+                input_transform = transforms.Compose([
+                    transforms.ToTensor(),
+                    transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]),
+                ])
+                img_tensor = input_transform(img).unsqueeze(0).to(self.config.device)
 
-            # 提取特征
-            img_tensor = transform(img).unsqueeze(0).to(self.config.device)
+                # 如果图像太大，调整大小
+                h, w = img_tensor.shape[2], img_tensor.shape[3]
+                if w > default_w:
+                    scale_factor = default_w / w
+                    new_h = int(h * scale_factor)
+                    img_tensor = F.interpolate(
+                        img_tensor, size=(new_h, default_w),
+                        mode="bilinear", align_corners=True
+                    )
+                    h, w = new_h, default_w
 
-            with torch.no_grad():
-                # LSeg 编码：使用 module.net(x, return_feature=True)
-                features = module.net(img_tensor, return_feature=True)  # [1, C, H, W]
+                # 使用官方的 MultiEvalModule 获取特征
+                with torch.no_grad():
+                    with torch.cuda.device_of(img_tensor):
+                        output_features = evaluator(img_tensor, return_feature=True)
+                        # output_features: [1, 512, h, w] 经过多尺度平均
 
-            # 插值到目标大小（如果指定了 feature_resize）
-            if self.config.feature_resize is not None:
-                features = F.interpolate(
-                    features,
-                    size=self.config.feature_resize,
-                    mode='bilinear',
-                    align_corners=False
-                )
-            else:
-                # 使用原始图像大小
-                features = F.interpolate(
-                    features,
-                    size=(img.size[1], img.size[0]),
-                    mode='bilinear',
-                    align_corners=False
-                )
+                # 插值到目标大小
+                if self.config.feature_resize is not None:
+                    h_target, w_target = self.config.feature_resize
+                else:
+                    h_target, w_target = h, w
 
-            # 转换为 [H, W, C] 格式
-            features = features.squeeze(0).permute(1, 2, 0).cpu()  # [H, W, C]
+                fmap = F.interpolate(output_features, size=(h_target, w_target), mode='bilinear', align_corners=False)
 
-            # 保存特征
-            torch.save(features, feature_path)
-            self.semantic_features[str(img_path)] = features
+                # Normalize - 官方逻辑
+                fmap = F.normalize(fmap, dim=1)  # [1, 512, h, w]
+
+                # 转换为 [C, H, W] 并保存为 half
+                fmap = fmap[0]  # [512, h, w]
+                fmap = fmap.cpu().half()  # 使用 half 精度
+
+                # 保存 - 官方格式
+                torch.save(fmap, feature_path)
+                self.semantic_features[str(img_path)] = fmap
+
+                # 清理
+                del img_tensor, output_features, fmap
+                if self.config.device.startswith('cuda'):
+                    torch.cuda.empty_cache()
+
+            except Exception as e:
+                CONSOLE.print(f"[red]Error processing {img_path.name}: {e}[/red]")
+                continue
+
+        CONSOLE.print(f"  [green]✓ Extracted {len(self.semantic_features)} LSeg features[/green]")
 
     def _extract_sam_features(self, image_filenames: List[Path], feature_dir: Path) -> None:
         """使用 SAM 提取特征
