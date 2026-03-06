@@ -11,6 +11,7 @@ feature_3dgs.egg-info/entry_points.txt
 feature_3dgs.egg-info/requires.txt
 feature_3dgs.egg-info/top_level.txt
 feature_3dgs/dataparsers/__init__.py
+feature_3dgs/dataparsers/feature_3dgs_dataparser.py
 feature_3dgs/dataparsers/semantic_feature_dataparser.py
 feature_3dgs/datasets/__init__.py
 feature_3dgs/datasets/semantic_feature_dataset.py

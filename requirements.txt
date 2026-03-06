@@ -20,7 +20,7 @@ wandb
 torchmetrics
 scikit-image
 scikit-learn
-#git+https://github.com/zhanghang1989/PyTorch-Encoding/
+git+https://github.com/RongLiu-Leo/PyTorch-Encoding/
 pycocotools
 onnxruntime 
 onnx

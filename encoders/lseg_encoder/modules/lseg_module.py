@@ -99,9 +99,18 @@ class LSegModule(LSegmentationModule):
 
     def get_labels(self, dataset):
         labels = []
-        path = 'label_files/{}_objectInfo150.txt'.format(dataset)
+        # 使用绝对路径查找标签文件
+        module_dir = os.path.dirname(os.path.abspath(__file__))
+        label_files_dir = os.path.normpath(os.path.join(module_dir, "..", "label_files"))
+        path = os.path.join(label_files_dir, '{}_objectInfo150.txt'.format(dataset))
+
+        if not os.path.exists(path):
+            # 尝试在 lseg_encoder 根目录下查找
+            lseg_encoder_dir = os.path.normpath(os.path.join(module_dir, "..", ".."))
+            path = os.path.join(lseg_encoder_dir, 'label_files', '{}_objectInfo150.txt'.format(dataset))
+
         assert os.path.exists(path), '*** Error : {} not exist !!!'.format(path)
-        f = open(path, 'r') 
+        f = open(path, 'r')
         lines = f.readlines()      
         for line in lines: 
             label = line.strip().split(',')[-1].split(';')[0]

@@ -52,7 +52,7 @@ def feature_3dgs():
                     cache_images_type="uint8",
                 ),
                 model=Feature3DGSModelConfig(
-                    semantic_feature_dim=512,
+                    semantic_feature_dim=256,  # LSeg demo_e200.ckpt uses 256
                     use_semantic_features=True,
                     semantic_loss_weight=1.0,
                     use_speedup=False,
@@ -136,7 +136,7 @@ def feature_3dgs_speedup():
                     cache_images_type="uint8",
                 ),
                 model=Feature3DGSModelConfig(
-                    semantic_feature_dim=512,
+                    semantic_feature_dim=256,  # LSeg demo_e200.ckpt uses 256
                     use_semantic_features=True,
                     semantic_loss_weight=1.0,
                     use_speedup=True,  # Enable CNN decoder for faster training
@@ -201,3 +201,15 @@ def semantic_feature_dataparser():
     from feature_3dgs.dataparsers.semantic_feature_dataparser import SemanticFeatureDataparserConfig
 
     return DataParserSpecification(config=SemanticFeatureDataparserConfig())
+
+
+def feature_3dgs_dataparser():
+    """Feature-3DGS complete dataparser with COLMAP and semantic feature extraction.
+
+    Returns:
+        DataParserSpecification: Configuration for feature-3dgs dataparser.
+    """
+    from nerfstudio.plugins.registry_dataparser import DataParserSpecification
+    from feature_3dgs.dataparsers.feature_3dgs_dataparser import Feature3DGSDataparserConfig
+
+    return DataParserSpecification(config=Feature3DGSDataparserConfig())

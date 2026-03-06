@@ -419,7 +419,20 @@ def _make_pretrained_clip_vitl16_384(
     pretrained, use_readout="ignore", hooks=None, enable_attention_hooks=False
 ):
     clip_pretrained, _ = clip.load("ViT-B/32", device='cuda', jit=False, download_root="/tmp/")
-    model = timm.create_model("vit_large_patch16_384", pretrained=pretrained)
+
+    # 使用本地 safetensors 模型文件，避免下载
+    import os
+    # 从 lseg_vit.py 到 lseg_encoder 需要向上两级：models/ -> modules/ -> lseg_encoder/
+    local_model_path = os.path.join(os.path.dirname(__file__), "../../timm/model.safetensors")
+    if os.path.exists(local_model_path):
+        model = timm.create_model("vit_large_patch16_384", pretrained=False)
+        # 从本地 safetensors 加载权重
+        from safetensors.torch import load_file
+        state_dict = load_file(local_model_path)
+        model.load_state_dict(state_dict, strict=False)
+    else:
+        # 如果本地文件不存在，尝试使用预训练（可能需要网络）
+        model = timm.create_model("vit_large_patch16_384", pretrained=pretrained)
 
     hooks = [5, 11, 17, 23] if hooks == None else hooks
     

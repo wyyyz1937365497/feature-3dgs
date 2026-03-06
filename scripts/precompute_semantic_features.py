@@ -2,14 +2,14 @@
 """
 Script to pre-compute semantic features for images using LSeg or SAM models.
 
-This script extracts semantic features from images and saves them as .pt files
-that can be used with the feature-3dgs model.
-
 Usage:
     python precompute_semantic_features.py --data <path> --output <dir> --model lseg
 """
 
 import argparse
+import os
+import subprocess
+import sys
 from pathlib import Path
 from typing import List, Optional
 
@@ -20,153 +20,181 @@ from tqdm import tqdm
 import numpy as np
 
 
-def load_lseg_model(device: str = "cuda"):
-    """Load the LSeg model for feature extraction.
-
-    Args:
-        device: Device to load the model on.
-
-    Returns:
-        LSeg model and transform.
-    """
-    try:
-        from encoders.lseg_encoder.encode_images import LSegEncoder
-        model = LSegEncoder(device=device)
-        transform = model.get_transform()
-        return model, transform
-    except ImportError:
-        print("LSeg encoder not found. Please ensure encoders/lseg_encoder is available.")
-        return None, None
-
-
-def load_sam_model(device: str = "cuda"):
-    """Load the SAM model for feature extraction.
-
-    Args:
-        device: Device to load the model on.
-
-    Returns:
-        SAM model and transform.
-    """
-    try:
-        from segment_anything import sam_model_registry, SamAutomaticMaskGenerator
-        # Load SAM model - you may need to adjust the model path
-        model_path = "path/to/sam_vit_h.pth"  # Update this path
-        sam = sam_model_registry["vit_h"](checkpoint=model_path)
-        sam.to(device=device)
-        return sam, None
-    except ImportError:
-        print("SAM not found. Please install segment-anything package.")
-        return None, None
-
-
-def extract_features_lseg(
+def extract_lseg_features_subprocess(
     image_paths: List[Path],
-    model,
-    transform,
-    device: str = "cuda",
+    output_dir: Path,
+    backbone: str = "clip_vitl16_384",
+    weights: Optional[Path] = None,
     target_size: Optional[tuple] = None,
+    device: str = "cuda",
 ) -> dict:
-    """Extract features using LSeg model.
+    """使用 LSeg 提取特征（使用简化的提取脚本）
 
     Args:
-        image_paths: List of image paths.
-        model: LSeg model.
-        transform: Image transform.
-        device: Device to use.
-        target_size: Target size for resizing (height, width). None for original size.
+        image_paths: 图像路径列表
+        output_dir: 输出目录
+        backbone: LSeg 主干网络
+        weights: 模型权重路径
+        target_size: 目标大小 (H, W)
+        device: 设备
 
     Returns:
-        Dictionary mapping image names to features.
+        特征字典
     """
+    project_root = Path.cwd().resolve()
+    extract_script = project_root / "scripts" / "extract_lseg_features.py"
+
+    if not extract_script.exists():
+        print(f"[bold red]Error: Extract script not found at {extract_script}[/bold red]")
+        return {}
+
+    # 构建命令
+    cmd = [
+        sys.executable,
+        str(extract_script),
+        "--images", str(image_paths[0].parent),
+        "--output", str(output_dir),
+        "--weights", str(weights) if weights else "encoders/lseg_encoder/demo_e200.ckpt",
+    ]
+
+    if target_size is not None:
+        cmd.extend(["--resize", str(target_size[0]), str(target_size[1])])
+
+    cmd.extend(["--device", device])
+
+    print(f"Running LSeg feature extraction...")
+    print(f"Images: {image_paths[0].parent}")
+    print(f"Output: {output_dir}")
+
+    # 运行脚本
+    result = subprocess.run(
+        cmd,
+        cwd=str(project_root),
+        env=os.environ.copy(),
+        check=False
+    )
+
+    if result.returncode != 0:
+        print("[bold red]LSeg feature extraction failed![/bold red]")
+        return {}
+
+    # 加载生成的特征
     features_dict = {}
-    model.eval()
+    output_dir = Path(output_dir).resolve()
+    for img_path in tqdm(image_paths, desc="Loading LSeg features"):
+        feature_path = output_dir / f"{img_path.stem}.pt"
+        if feature_path.exists():
+            try:
+                features_dict[str(img_path)] = torch.load(feature_path)
+            except:
+                pass
 
-    with torch.no_grad():
-        for img_path in tqdm(image_paths, desc="Extracting LSeg features"):
-            img = Image.open(img_path).convert("RGB")
-
-            # Resize if target size is specified
-            if target_size is not None:
-                img = img.resize((target_size[1], target_size[0]), Image.BILINEAR)
-
-            img_tensor = transform(img).unsqueeze(0).to(device)
-
-            # Extract features
-            features = model.encode_images(img_tensor)  # [1, C, H, W]
-
-            # Convert to [H, W, C] format
-            features = features.squeeze(0).permute(1, 2, 0).cpu()  # [H, W, C]
-
-            features_dict[img_path.stem] = features
-
+    print(f"Loaded {len(features_dict)} feature files")
     return features_dict
 
 
-def extract_features_sam(
+def extract_sam_features(
     image_paths: List[Path],
-    model,
-    device: str = "cuda",
+    output_dir: Path,
+    checkpoint: Optional[Path] = None,
+    model_type: str = "vit_h",
     target_size: Optional[tuple] = None,
+    device: str = "cuda",
 ) -> dict:
-    """Extract features using SAM model (segmentation-based).
+    """使用 SAM 提取特征
 
     Args:
-        image_paths: List of image paths.
-        model: SAM model.
-        device: Device to use.
-        target_size: Target size for resizing.
+        image_paths: 图像路径列表
+        output_dir: 输出目录
+        checkpoint: SAM 模型权重路径
+        model_type: SAM 模型类型
+        target_size: 目标大小 (H, W)
+        device: 设备
 
     Returns:
-        Dictionary mapping image names to features.
+        特征字典
     """
-    from segment_anything import SamAutomaticMaskGenerator
+    project_root = Path.cwd().resolve()
 
-    mask_generator = SamAutomaticMaskGenerator(model)
-    features_dict = {}
+    # 设置默认权重路径
+    if checkpoint is None:
+        checkpoint = project_root / "encoders" / "sam_encoder" / "checkpoints" / "sam_vit_h_4b8939.pth"
+    else:
+        checkpoint = Path(checkpoint).resolve()
 
-    for img_path in tqdm(image_paths, desc="Extracting SAM features"):
-        img = np.array(Image.open(img_path).convert("RGB"))
+    if not checkpoint.exists():
+        print(f"[bold red]Error: SAM checkpoint not found at {checkpoint}[/bold red]")
+        print("  Please download from: https://dl.fbaipublicfiles.com/segment_anything/sam_vit_h_4b8939.pth")
+        return {}
 
-        # Resize if target size is specified
-        if target_size is not None:
-            from PIL import Image as PILImage
-            img_pil = PILImage.fromarray(img)
-            img_pil = img_pil.resize((target_size[1], target_size[0]), PILImage.BILINEAR)
-            img = np.array(img_pil)
+    try:
+        from segment_anything import sam_model_registry
+    except ImportError:
+        print("[bold red]Error: SAM not installed[/bold red]")
+        print("  Please install: pip install git+https://github.com/facebookresearch/segment-anything.git")
+        return {}
 
-        # Generate masks
-        masks = mask_generator.generate(img)
+    # 加载模型
+    print(f"Loading SAM model from {checkpoint}...")
+    sam = sam_model_registry[model_type](checkpoint=str(checkpoint))
+    sam.to(device)
+    sam.eval()
 
-        # Convert masks to feature tensor
-        # This is a simplified version - you may want to use embeddings directly
-        H, W = img.shape[:2]
-        feature_dim = 256  # Adjust based on your needs
-
-        # Create a feature tensor from mask information
-        feature_tensor = torch.zeros(H, W, feature_dim)
-
-        # Here you would process the masks to create meaningful features
-        # For now, this is a placeholder
-
-        features_dict[img_path.stem] = feature_tensor
-
-    return features_dict
-
-
-def save_features(features_dict: dict, output_dir: Path):
-    """Save features to disk.
-
-    Args:
-        features_dict: Dictionary of features.
-        output_dir: Output directory.
-    """
-    output_dir = Path(output_dir)
+    output_dir = Path(output_dir).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    for img_name, features in tqdm(features_dict.items(), desc="Saving features"):
-        output_path = output_dir / f"{img_name}.pt"
-        torch.save(features, output_path)
+    features_dict = {}
+
+    print(f"Extracting features from {len(image_paths)} images...")
+
+    with torch.no_grad():
+        for img_path in tqdm(image_paths, desc="Extracting SAM features"):
+            # 检查是否已存在
+            feature_path = output_dir / f"{img_path.stem}.pt"
+            if feature_path.exists():
+                try:
+                    features_dict[str(img_path)] = torch.load(feature_path)
+                    continue
+                except:
+                    pass
+
+            # 加载图像
+            img = np.array(Image.open(img_path).convert("RGB"))
+
+            # 调整大小（如果指定）
+            original_size = tuple(img.shape[:2])
+            if target_size is not None:
+                from PIL import Image as PILImage
+                img_pil = PILImage.fromarray(img)
+                img_pil = img_pil.resize((target_size[1], target_size[0]), PILImage.BILINEAR)
+                img = np.array(img_pil)
+
+            # SAM 预处理
+            from segment_anything.utils.transforms import ResizeLongestSide
+
+            transform = ResizeLongestSide(sam.image_encoder.img_size)
+            input_image = transform.apply_image(img)
+            input_image_torch = torch.as_tensor(input_image, device=device).permute(2, 0, 1).contiguous()
+
+            # 提取特征
+            features = sam.image_encoder(input_image_torch.unsqueeze(0))  # [1, C, H, W]
+
+            # 调整到原始图像大小
+            features = F.interpolate(
+                features,
+                size=(original_size[1], original_size[0]),
+                mode='bilinear',
+                align_corners=False
+            )
+
+            # 转换为 [H, W, C] 格式
+            features = features.squeeze(0).permute(1, 2, 0).cpu()  # [H, W, C]
+
+            # 保存特征
+            torch.save(features, feature_path)
+            features_dict[str(img_path)] = features
+
+    return features_dict
 
 
 def main():
@@ -185,13 +213,21 @@ def main():
     parser.add_argument("--resize", type=int, nargs=2, default=None, help="Resize images to H W")
     parser.add_argument("--extension", type=str, default=["jpg", "png", "jpeg"], nargs="+", help="Image extensions")
 
+    # LSeg specific
+    parser.add_argument("--backbone", type=str, default="clip_vitl16_384", help="LSeg backbone")
+    parser.add_argument("--weights", type=str, default=None, help="Path to model weights")
+
+    # SAM specific
+    parser.add_argument("--checkpoint", type=str, default=None, help="SAM checkpoint path")
+    parser.add_argument("--model-type", type=str, default="vit_h", help="SAM model type")
+
     args = parser.parse_args()
 
-    # Find all images
+    # 查找所有图像
     data_dir = Path(args.data)
     images_dir = data_dir / args.images
     if not images_dir.exists():
-        images_dir = data_dir  # Try data directory directly
+        images_dir = data_dir  # 尝试直接使用数据目录
 
     image_paths = []
     for ext in args.extension:
@@ -205,32 +241,33 @@ def main():
         print("No images found!")
         return
 
-    # Load model
-    print(f"Loading {args.model.upper()} model...")
-    if args.model == "lseg":
-        model, transform = load_lseg_model(args.device)
-        if model is None:
-            return
-    else:  # sam
-        model, transform = load_sam_model(args.device)
-        if model is None:
-            return
-
-    # Set target size
+    # 确定目标大小
     target_size = tuple(args.resize) if args.resize else None
 
-    # Extract features
-    print(f"Extracting features from {len(image_paths)} images...")
+    # 提取特征
     if args.model == "lseg":
-        features_dict = extract_features_lseg(image_paths, model, transform, args.device, target_size)
+        features_dict = extract_lseg_features_subprocess(
+            image_paths=image_paths,
+            output_dir=Path(args.output),
+            backbone=args.backbone,
+            weights=Path(args.weights) if args.weights else None,
+            target_size=target_size,
+            device=args.device,
+        )
+    else:  # sam
+        features_dict = extract_sam_features(
+            image_paths=image_paths,
+            output_dir=Path(args.output),
+            checkpoint=Path(args.checkpoint) if args.checkpoint else None,
+            model_type=args.model_type,
+            target_size=target_size,
+            device=args.device,
+        )
+
+    if features_dict:
+        print(f"Done! Saved {len(features_dict)} feature files to {args.output}")
     else:
-        features_dict = extract_features_sam(image_paths, model, args.device, target_size)
-
-    # Save features
-    print(f"Saving features to {args.output}...")
-    save_features(features_dict, Path(args.output))
-
-    print(f"Done! Saved {len(features_dict)} feature files.")
+        print("Feature extraction failed!")
 
 
 if __name__ == "__main__":

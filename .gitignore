@@ -15,3 +15,4 @@ data_scannet
 !feature_3dgs_extension/data/
 *.dump
 .claude/
+*.safetensors
