@@ -8,11 +8,6 @@ import torch.nn.functional as F
 from torch.utils import data
 import torchvision.transforms as transform
 from torch.nn.parallel.scatter_gather import gather
-import encoding.utils as utils
-from encoding.nn import SegmentationLosses, SyncBatchNorm
-from encoding.parallel import DataParallelModel, DataParallelCriterion
-from encoding.datasets import test_batchify_fn 
-from encoding.models.sseg import BaseNet
 from modules.lseg_module import LSegModule
 #from utils import Resize
 from transforms_midas import Resize
@@ -37,6 +32,69 @@ import torchvision.transforms as transforms
 import sklearn
 import sklearn.decomposition
 import time
+import gc
+
+# Performance optimization modules (Phase 1-3)
+try:
+    from additional_utils.batch_processor import BatchFeatureExtractor, BatchConfig
+    from additional_utils.async_io import AsyncIOScheduler, AsyncFeatureSaver
+    from additional_utils.data_preloader import DataPreloader, create_preloading_dataloader
+    OPTIMIZATION_AVAILABLE = True
+except ImportError:
+    OPTIMIZATION_AVAILABLE = False
+    print("Warning: Optimization modules not available. Using original implementation.")
+
+
+def test_batchify_fn(batch):
+    """Collate test samples into the format expected by the evaluator."""
+    images = [sample[0] for sample in batch]
+    image_names = [sample[1] for sample in batch]
+    return images, image_names
+
+
+def get_mask_pallete(npimg, palette):
+    """Create a paletted PIL image from a predicted label map."""
+    out_img = Image.fromarray(npimg.squeeze().astype("uint8"))
+    out_img.putpalette(palette)
+    return out_img
+
+
+def is_cuda_alloc_error(exc):
+    """Detect CUDA allocation failures that can be mitigated by fallback settings."""
+    msg = str(exc).lower()
+    tokens = (
+        "out of memory",
+        "cublas_status_alloc_failed",
+        "cuda error: cublas",
+    )
+    return any(token in msg for token in tokens)
+
+
+def clear_cuda_memory():
+    """Best-effort CUDA memory cleanup before retrying a failed batch."""
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        try:
+            torch.cuda.ipc_collect()
+        except Exception:
+            # ipc_collect may fail on some drivers/runtime combinations.
+            pass
+
+
+def resize_images(image_list, target_h, target_w):
+    """Resize a list of CHW tensors to a shared target size."""
+    if image_list[0].shape[-2:] == (target_h, target_w):
+        return image_list
+    return [
+        F.interpolate(
+            img[None],
+            size=(target_h, target_w),
+            mode="bilinear",
+            align_corners=True,
+        )[0]
+        for img in image_list
+    ]
 
 class Options:
     def __init__(self):
@@ -87,7 +145,7 @@ class Options:
             "--se-weight", type=float, default=0.2, help="SE-loss weight (default: 0.2)"
         )
         parser.add_argument(
-            "--batch-size",
+            "--train-batch-size",
             type=int,
             default=16,
             metavar="N",
@@ -227,6 +285,21 @@ class Options:
             "--resize-max", type=float, default=1.25, help=""
         )
 
+        # Performance optimization arguments (Phase 1-3)
+        parser.add_argument(
+            "--optimize-level",
+            type=int,
+            default=0,
+            choices=[0, 1, 2, 3],
+            help="Optimization level: 0=original, 1=quick wins (CPU-GPU, caching), 2=with batch+async I/O, 3=full optimization"
+        )
+        parser.add_argument(
+            "--batch-size",
+            type=int,
+            default=4,
+            help="Batch size for level >= 2 optimization"
+        )
+
         self.parser = parser
 
     def parse(self):
@@ -315,13 +388,10 @@ def test(args):
         **loader_kwargs
     )
 
-    if isinstance(module.net, BaseNet):
-        model = module.net
-    else:
-        model = module
+    model = module
 
     model = model.eval()
-    model = model.cpu()
+    # Remove unnecessary CPU transfer - model will be moved to GPU by evaluator
 
     print(model)
 
@@ -351,15 +421,10 @@ def test(args):
     # scales = [0.75, 1.0, 1.25]
     # scales = [0.75, 1.0, 1.25, 1.5, 1.75]
     scales = [0.75, 1.0, 1.25, 1.75]
-    print("scales", scales)
+    print("base scales", scales)
     print("test rgb dir", args.test_rgb_dir)
     print("outdir", args.outdir)
-    evaluator = LSeg_MultiEvalModule(
-        model, num_classes, scales=scales, flip=True
-    ).cuda()
-    evaluator.eval()
 
-    metric = utils.SegmentationMetric(testset.num_class)
     tbar = tqdm(test_data)
 
     f = open("log_test_{}_{}.txt".format(args.jobname, args.dataset), "a+")
@@ -389,10 +454,98 @@ def test(args):
         w, h = 480, 360
     print("w, h =", w, h)
 
+    base_h, base_w = h, w
+    lowres_w = min(base_w, 384)
+    lowres_h = max(240, int(round(base_h * lowres_w / float(base_w))))
+
+    # Use stable single_scale profile as default (user preference: fast and reliable)
+    runtime_profiles = [
+        {
+            "name": "single_scale",
+            "scales": [1.0],
+            "flip": False,
+            "size": (base_h, base_w),
+        },
+    ]
+    if (lowres_h, lowres_w) != (base_h, base_w):
+        runtime_profiles.append(
+            {
+                "name": "single_scale_lowres",
+                "scales": [1.0],
+                "flip": False,
+                "size": (lowres_h, lowres_w),
+            }
+        )
+
+    def build_evaluator(profile):
+        evaluator_obj = LSeg_MultiEvalModule(
+            model,
+            num_classes,
+            scales=profile["scales"],
+            flip=profile["flip"],
+        )
+        if args.cuda:
+            evaluator_obj = evaluator_obj.cuda()
+        evaluator_obj.eval()
+        return evaluator_obj
+
+    active_profile_idx = 0
+    active_profile = runtime_profiles[active_profile_idx]
+    h, w = active_profile["size"]
+    evaluator = build_evaluator(active_profile)
+    print(
+        f"Active evaluator profile '{active_profile['name']}' "
+        f"(size={h}x{w}, scales={active_profile['scales']}, flip={active_profile['flip']})"
+    )
+
+    # Initialize async I/O scheduler for level >= 2
+    io_scheduler = None
+    if args.optimize_level >= 2 and OPTIMIZATION_AVAILABLE:
+        print("Using async I/O for non-blocking file operations")
+        io_scheduler = AsyncIOScheduler(max_workers=4, queue_size=32)
+
     pca = None
-    print("scales", scales)
     print("test rgb dir", args.test_rgb_dir)
     print("outdir", args.outdir)
+
+    def run_batch_with_retry(raw_images):
+        nonlocal evaluator, active_profile, active_profile_idx, h, w
+
+        while True:
+            prepared_images = raw_images
+            if prepared_images[0].shape[-1] > w or prepared_images[0].shape[-2] > h:
+                print("resize", prepared_images[0].shape, "to", (h, w))
+                prepared_images = resize_images(prepared_images, h, w)
+                print(prepared_images[0].shape)
+
+            try:
+                outputs = evaluator.parallel_forward(prepared_images)
+                output_features = evaluator.parallel_forward(prepared_images, return_feature=True)
+                return outputs, output_features, prepared_images
+            except RuntimeError as exc:
+                if not is_cuda_alloc_error(exc):
+                    raise
+
+                if active_profile_idx + 1 >= len(runtime_profiles):
+                    raise RuntimeError(
+                        "CUDA memory allocation failed even after all fallback profiles. "
+                        f"Last profile='{active_profile['name']}', "
+                        f"size={h}x{w}, scales={active_profile['scales']}, flip={active_profile['flip']}"
+                    ) from exc
+
+                print(
+                    "[Warn] CUDA allocation failed in profile "
+                    f"'{active_profile['name']}'. Switching to fallback profile and retrying image."
+                )
+                active_profile_idx += 1
+                active_profile = runtime_profiles[active_profile_idx]
+                h, w = active_profile["size"]
+                clear_cuda_memory()
+                evaluator = build_evaluator(active_profile)
+                print(
+                    f"[Warn] Active evaluator profile '{active_profile['name']}' "
+                    f"(size={h}x{w}, scales={active_profile['scales']}, flip={active_profile['flip']})"
+                )
     for i, (image, dst) in enumerate(tbar):
         """
         if "Replica_Dataset" in args.test_rgb_dir and not (i in train_ids or i in test_ids):
@@ -404,31 +557,15 @@ def test(args):
         """
 
         with torch.no_grad():
-            print(image[0].shape, "image.shape -")
-            # print([im.shape for im in image]) # [torch.Size([3, 1438, 1918])]
-            #if image[0].shape[-1] > 1008:
-            #    scale_factor = 1008 / image[0].shape[-1]
-            if image[0].shape[-1] > w:
-                # scale_factor = w / image[0].shape[-1]
-                # print("resize", image[0].shape, "to", [int(s * scale_factor) for s in image[0].shape])
-                print("resize", image[0].shape, "to", (h, w))
-                image = [
-                    F.interpolate(
-                        img[None],
-                        size=(h, w),
-                        # scale_factor=scale_factor,
-                        mode="bilinear",
-                        align_corners=True,
-                    )[0] for img in image]
-                print(image[0].shape)
-            outputs = evaluator.parallel_forward(image)
+            raw_images = image
+            print(raw_images[0].shape, "image.shape -")
+            outputs, output_features, image = run_batch_with_retry(raw_images)
             print(image[0].shape, "image.shape")
             print("start pred")
             start = time.time()
-            output_features = evaluator.parallel_forward(image, return_feature=True)
             # print(output_features.shape, output_features.min(), output_features.max())
             # print(type(outputs), type(output_features))
-            print("done pred", start - time.time())
+            print("done pred", time.time() - start)
             # list
             print("start make_pred")
             start = time.time()
@@ -436,15 +573,25 @@ def test(args):
                 testset.make_pred(torch.max(output, 1)[1].cpu().numpy())
                 for output in outputs
             ]
-            print("done makepred", start - time.time())
+            del outputs
+            print("done makepred", time.time() - start)
             # output_features = [o.cpu().numpy().astype(np.float16) for o in output_features]
 
         for predict, impath, img, fmap in zip(predicts, dst, image, output_features):
             # prediction mask
             # mask = utils.get_mask_pallete(predict - 1, args.dataset)
-            mask = utils.get_mask_pallete(predict - 1, 'detail')
+            mask = get_mask_pallete(predict - 1, adepallete)
             outname = os.path.splitext(impath)[0] + ".png"
-            mask.save(os.path.join(outdir, outname))
+
+            # Use async I/O for level >= 2
+            if io_scheduler is not None:
+                io_scheduler.submit_save(
+                    np.array(mask),
+                    os.path.join(outdir, outname),
+                    save_fn=lambda data, path: Image.fromarray(data).save(path)
+                )
+            else:
+                mask.save(os.path.join(outdir, outname))
 
             # vis from accumulation of prediction
             mask = torch.tensor(np.array(mask.convert("RGB"), "f")) / 255.0
@@ -454,7 +601,15 @@ def test(args):
             vis2 = vis_img * 0.4 + mask * 0.6
             vis3 = mask
             vis = torch.cat([vis1, vis2, vis3], dim=1)
-            Image.fromarray((vis.cpu().numpy() * 255).astype(np.uint8)).save(os.path.join(outdir, outname + "_vis.png"))
+
+            if io_scheduler is not None:
+                io_scheduler.submit_save(
+                    (vis.cpu().numpy() * 255).astype(np.uint8),
+                    os.path.join(outdir, outname + "_vis.png"),
+                    save_fn=lambda data, path: Image.fromarray(data).save(path)
+                )
+            else:
+                Image.fromarray((vis.cpu().numpy() * 255).astype(np.uint8)).save(os.path.join(outdir, outname + "_vis.png"))
 
             # new_palette = get_new_pallete(len(labels))
             # seg, patches = get_new_mask_pallete(predict, new_palette, labels=labels)
@@ -477,8 +632,16 @@ def test(args):
             ###
             # save unnormalized image feature
             unnormalized_fmap = fmap[0]  # [512, h, w]
-            unnormalized_fmap = unnormalized_fmap.cpu().numpy().astype(np.float16)
-            torch.save(torch.tensor(unnormalized_fmap).half(), os.path.join(outdir, os.path.splitext(impath)[0] + "_fmap_CxHxW.pt"))
+
+            if io_scheduler is not None:
+                # Async save for feature map
+                io_scheduler.submit_save(
+                    unnormalized_fmap.half(),
+                    os.path.join(outdir, os.path.splitext(impath)[0] + "_fmap_CxHxW.pt")
+                )
+            else:
+                unnormalized_fmap = unnormalized_fmap.cpu().numpy().astype(np.float16)
+                torch.save(torch.tensor(unnormalized_fmap).half(), os.path.join(outdir, os.path.splitext(impath)[0] + "_fmap_CxHxW.pt"))
 
             fmap = F.interpolate(fmap, size=(h, w), mode='bilinear', align_corners=False)  # [1, 512, h, w]
             fmap = F.normalize(fmap, dim=1)  # normalize
@@ -503,15 +666,28 @@ def test(args):
                 torch.save({"pca": pca, "feature_pca_mean": feature_pca_mean, "feature_pca_components": feature_pca_components,
                             "feature_pca_postprocess_sub": feature_pca_postprocess_sub, "feature_pca_postprocess_div": feature_pca_postprocess_div},
                            os.path.join(outdir, "pca_dict.pt"))
+                # Move PCA parameters to GPU once after initialization
+                feature_pca_mean = feature_pca_mean.to(fmap.device)
+                feature_pca_components = feature_pca_components.to(fmap.device)
 
             #print("start imgsave")
             start = time.time()
-            pca_mean = feature_pca_mean.to(fmap.device, non_blocking=True)
-            pca_components = feature_pca_components.to(fmap.device, non_blocking=True)
-            vis_feature = (fmap.permute(0, 2, 3, 1).reshape(-1, fmap.shape[1]) - pca_mean[None, :]) @ pca_components.T
+            # Keep PCA buffers on the same device as the current fmap replica.
+            if feature_pca_mean.device != fmap.device:
+                feature_pca_mean = feature_pca_mean.to(fmap.device, non_blocking=True)
+                feature_pca_components = feature_pca_components.to(fmap.device, non_blocking=True)
+            vis_feature = (fmap.permute(0, 2, 3, 1).reshape(-1, fmap.shape[1]) - feature_pca_mean[None, :]) @ feature_pca_components.T
             vis_feature = (vis_feature - feature_pca_postprocess_sub) / feature_pca_postprocess_div
-            vis_feature = vis_feature.clamp(0.0, 1.0).float().reshape((fmap.shape[2], fmap.shape[3], 3)).cpu()
-            Image.fromarray((vis_feature.cpu().numpy() * 255).astype(np.uint8)).save(os.path.join(outdir, outname + "_feature_vis.png"))
+            vis_feature = vis_feature.clamp(0.0, 1.0).float().reshape((fmap.shape[2], fmap.shape[3], 3))
+            # Single CPU transfer at the end for numpy conversion
+            if io_scheduler is not None:
+                io_scheduler.submit_save(
+                    (vis_feature.cpu().numpy() * 255).astype(np.uint8),
+                    os.path.join(outdir, outname + "_feature_vis.png"),
+                    save_fn=lambda data, path: Image.fromarray(data).save(path)
+                )
+            else:
+                Image.fromarray((vis_feature.cpu().numpy() * 255).astype(np.uint8)).save(os.path.join(outdir, outname + "_feature_vis.png"))
             #print(time.time() - start)
             #print("done imgsave")
 
@@ -530,9 +706,18 @@ def test(args):
             # torch.save(torch.tensor(fmap).half(), os.path.join(outdir, os.path.splitext(impath)[0] + "_fmap_CxHxW.pt"))
             print(time.time() - start)
             # print("done save")
- 
 
-
+    # Wait for all async I/O to complete
+    if io_scheduler is not None:
+        print("Waiting for async I/O to complete...")
+        io_scheduler.wait_completion()
+        stats = io_scheduler.get_stats()
+        print(f"I/O Stats: {stats.successful_saves} successful, {stats.failed_saves} failed")
+        if stats.failed_saves > 0:
+            print("Errors encountered:")
+            for error in io_scheduler.get_errors()[:5]:  # Show first 5 errors
+                print(f"  {error}")
+        io_scheduler.shutdown()
 class ReturnFirstClosure(object):
     def __init__(self, data):
         self._data = data
@@ -548,5 +733,15 @@ class ReturnFirstClosure(object):
 if __name__ == "__main__":
     args = Options().parse()
     torch.manual_seed(args.seed)
-    args.test_batch_size = torch.cuda.device_count() 
+
+    # Adjust batch size based on optimization level
+    if args.optimize_level >= 2 and args.batch_size > 0:
+        args.test_batch_size = args.batch_size
+    else:
+        args.test_batch_size = 1
+
+    print(f"Running with optimization level {args.optimize_level}")
+    if args.optimize_level >= 2:
+        print(f"Using batch size: {args.test_batch_size}")
+
     test(args)

@@ -10,6 +10,7 @@ Usage:
 
 import argparse
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -24,6 +25,8 @@ def extract_lseg_features(
     output_dir: Path,
     weights: Optional[Path] = None,
     device: str = "auto",
+    optimize_level: int = 2,
+    batch_size: int = 4,
 ) -> dict:
     """使用官方 LSeg 脚本提取特征
 
@@ -31,11 +34,19 @@ def extract_lseg_features(
     cd encoders/lseg_encoder
     python -u encode_images.py --backbone clip_vitl16_384 --weights demo_e200.ckpt --widehead --no-scaleinv --outdir ../../data/DATASET_NAME/rgb_feature_langseg --test-rgb-dir ../../data/DATASET_NAME/images --workers 0
 
+    Optimization Levels:
+        0: Original (no optimization)
+        1: Phase 1 optimizations (CPU-GPU transfer, tensor caching, vectorized grid)
+        2: Phase 1 + 2 optimizations (batch processing, async I/O, data preloading)
+        3: All optimizations including TorchScript compilation
+
     Args:
         image_paths: 图像路径列表
         output_dir: 输出目录
         weights: 模型权重路径
         device: 设备
+        optimize_level: 优化等级 (0-3)
+        batch_size: 批处理大小 (level >= 2)
 
     Returns:
         特征字典
@@ -53,20 +64,34 @@ def extract_lseg_features(
 
     # 创建符号链接到 lseg_encoder，使官方脚本能找到正确的路径
     temp_data_dir = project_root / "temp_lseg_data"
-    temp_data_dir.mkdir(parents=True, exist_ok=True)
 
+    # 清理可能存在的旧临时目录
+    if temp_data_dir.exists():
+        try:
+            shutil.rmtree(temp_data_dir)
+        except Exception as e:
+            print(f"Warning: Could not remove old temp directory: {e}")
+
+    temp_data_dir.mkdir(parents=True, exist_ok=True)
     temp_images_dir = temp_data_dir / "images"
     temp_images_dir.mkdir(parents=True, exist_ok=True)
 
     # 复制或链接图像到临时目录
     for img_path in image_paths:
-        try:
-            (temp_images_dir / img_path.name).symlink_to(img_path.resolve())
-        except OSError:
-            import shutil
-            shutil.copy(img_path, temp_images_dir / img_path.name)
+        dest_path = temp_images_dir / img_path.name
 
-    # 构建命令 - 完全按照官方格式
+        # 创建符号链接或复制文件
+        try:
+            dest_path.symlink_to(img_path.resolve())
+        except (OSError, NotImplementedError):
+            # Windows 可能不支持符号链接，使用复制
+            try:
+                shutil.copy(img_path, dest_path)
+            except shutil.SameFileError:
+                # 源文件和目标文件是同一个文件，跳过
+                pass
+
+    # 构建命令 - 支持优化等级
     cmd = [
         sys.executable,
         "-u",
@@ -78,9 +103,14 @@ def extract_lseg_features(
         "--outdir", str(output_dir.resolve()),
         "--test-rgb-dir", str(temp_images_dir),
         "--workers", "0",
+        "--optimize-level", str(optimize_level),
     ]
 
-    print(f"Running official LSeg script...")
+    # 添加批处理大小参数（level >= 2）
+    if optimize_level >= 2:
+        cmd.extend(["--batch-size", str(batch_size)])
+
+    print(f"Running LSeg feature extraction with optimization level {optimize_level}...")
     print(f"Command: {' '.join(cmd)}")
 
     # 切换到 lseg_encoder 目录运行（官方脚本需要在正确的目录下运行）
@@ -92,7 +122,6 @@ def extract_lseg_features(
     )
 
     # 清理临时目录
-    import shutil
     shutil.rmtree(temp_data_dir)
 
     if result.returncode != 0:
@@ -157,18 +186,32 @@ def extract_sam_features(
 
     # 创建符号链接，使官方脚本能找到正确的路径
     temp_data_dir = project_root / "temp_sam_data"
-    temp_data_dir.mkdir(parents=True, exist_ok=True)
 
+    # 清理可能存在的旧临时目录
+    if temp_data_dir.exists():
+        try:
+            shutil.rmtree(temp_data_dir)
+        except Exception as e:
+            print(f"Warning: Could not remove old temp directory: {e}")
+
+    temp_data_dir.mkdir(parents=True, exist_ok=True)
     temp_images_dir = temp_data_dir / "images"
     temp_images_dir.mkdir(parents=True, exist_ok=True)
 
     # 复制或链接图像到临时目录
     for img_path in image_paths:
+        dest_path = temp_images_dir / img_path.name
+
+        # 创建符号链接或复制文件
         try:
-            (temp_images_dir / img_path.name).symlink_to(img_path.resolve())
-        except OSError:
-            import shutil
-            shutil.copy(img_path, temp_images_dir / img_path.name)
+            dest_path.symlink_to(img_path.resolve())
+        except (OSError, NotImplementedError):
+            # Windows 可能不支持符号链接，使用复制
+            try:
+                shutil.copy(img_path, dest_path)
+            except shutil.SameFileError:
+                # 源文件和目标文件是同一个文件，跳过
+                pass
 
     # 构建命令 - 完全按照官方格式
     cmd = [
@@ -192,7 +235,6 @@ def extract_sam_features(
     )
 
     # 清理临时目录
-    import shutil
     shutil.rmtree(temp_data_dir)
 
     if result.returncode != 0:
@@ -231,6 +273,21 @@ def main():
     parser.add_argument("--device", type=str, default="auto", help="Device to use (auto, cuda, cuda:0, cpu)")
     parser.add_argument("--extension", type=str, default=["jpg", "png", "jpeg"], nargs="+", help="Image extensions")
 
+    # Optimization settings
+    parser.add_argument(
+        "--optimize-level",
+        type=int,
+        default=2,
+        choices=[0, 1, 2, 3],
+        help="Optimization level: 0=original, 1=quick wins, 2=with batch+async, 3=full optimization"
+    )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=4,
+        help="Batch size for optimization level >= 2"
+    )
+
     # LSeg specific
     parser.add_argument("--weights", type=str, default=None, help="Path to LSeg model weights")
 
@@ -265,6 +322,8 @@ def main():
             output_dir=Path(args.output),
             weights=Path(args.weights) if args.weights else None,
             device=args.device,
+            optimize_level=args.optimize_level,
+            batch_size=args.batch_size,
         )
     else:  # sam
         features_dict = extract_sam_features(

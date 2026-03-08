@@ -13,7 +13,6 @@ import threading
 import types
 import torch
 from torch.cuda._utils import _get_device_index
-from torch.cuda.amp import autocast
 from torch._utils import ExceptionWrapper
 
 up_kwargs = {'mode': 'bilinear', 'align_corners': True}
@@ -47,8 +46,28 @@ class MultiEvalModule(DataParallel):
         self.crop_size = module.crop_size
         self.scales = scales
         self.flip = flip
+        # Tensor cache for efficient memory reuse (Phase 1.2 optimization)
+        self._tensor_cache = {}
         print('MultiEvalModule: base_size {}, crop_size {}'. \
             format(self.base_size, self.crop_size))
+
+    def _get_cached_tensor(self, shape, device, dtype=None):
+        """Get cached tensor or create new one (avoids frequent allocations)
+
+        Args:
+            shape: Tensor shape tuple
+            device: Target device
+            dtype: Optional dtype (defaults to float32)
+
+        Returns:
+            Cached or new zero tensor
+        """
+        if dtype is None:
+            dtype = torch.float32
+        key = (shape, device, dtype)
+        if key not in self._tensor_cache or self._tensor_cache[key].shape != shape:
+            self._tensor_cache[key] = torch.zeros(shape, device=device, dtype=dtype)
+        return self._tensor_cache[key]
 
     def parallel_forward(self, inputs, **kwargs):
         """Multi-GPU Mult-size Evaluation
@@ -59,34 +78,46 @@ class MultiEvalModule(DataParallel):
         if not inputs:
             return []
 
-        device_ids = self.device_ids[:len(inputs)]
+        # CPU-only fallback path.
+        if not self.device_ids:
+            return [self.forward(input_tensor.unsqueeze(0), **kwargs) for input_tensor in inputs]
 
-        # 1) 准备输入数据
-        inputs = [(input.unsqueeze(0).to(device, non_blocking=True),)
-                  for input, device in zip(inputs, device_ids)]
+        max_chunk_size = max(1, len(self.device_ids))
+        all_outputs = []
 
-        # 2) 复制 MultiEval 包装器
-        replicas = self.replicate(self, device_ids)
+        # Process in chunks so batch_size can be larger than number of GPUs.
+        for chunk_start in range(0, len(inputs), max_chunk_size):
+            input_chunk = inputs[chunk_start:chunk_start + max_chunk_size]
+            device_ids = self.device_ids[:len(input_chunk)]
 
-        # 3) 单独复制底层模型，并显式替换到每个包装器副本上
-        #    避免某些版本下 replicate(self) 时 self.module 仍指向 cuda:0 权重
-        module_replicas = self.replicate(self.module, device_ids)
-        for replica, module_replica, device in zip(replicas, module_replicas, device_ids):
-            _fix_replica_monkey_patched_methods(module_replica)
-            replica.module = module_replica
-            replica.device_ids = [device]
-            replica.output_device = device
+            # 1) Prepare input data for this chunk.
+            scattered_inputs = [
+                (input_tensor.unsqueeze(0).to(device, non_blocking=True),)
+                for input_tensor, device in zip(input_chunk, device_ids)
+            ]
 
-        # 4) 准备 kwargs
-        if kwargs:
-            kwargs = [dict(kwargs) for _ in range(len(inputs))]
-        else:
-            kwargs = [{} for _ in range(len(inputs))]
+            # 2) Replicate MultiEval wrappers.
+            replicas = self.replicate(self, device_ids)
 
-        # 5) 并行执行
-        outputs = self.parallel_apply(replicas, inputs, kwargs)
-        
-        return outputs
+            # 3) Replicate base models and bind to wrapper replicas.
+            module_replicas = self.replicate(self.module, device_ids)
+            for replica, module_replica, device in zip(replicas, module_replicas, device_ids):
+                _fix_replica_monkey_patched_methods(module_replica)
+                replica.module = module_replica
+                replica.device_ids = [device]
+                replica.output_device = device
+
+            # 4) Prepare kwargs for this chunk.
+            if kwargs:
+                chunk_kwargs = [dict(kwargs) for _ in range(len(scattered_inputs))]
+            else:
+                chunk_kwargs = [{} for _ in range(len(scattered_inputs))]
+
+            # 5) Parallel execution for this chunk.
+            chunk_outputs = self.parallel_apply(replicas, scattered_inputs, chunk_kwargs)
+            all_outputs.extend(chunk_outputs)
+
+        return all_outputs
     
     def forward(self, image, return_feature=False):
         """Mult-size Evaluation"""
@@ -96,9 +127,8 @@ class MultiEvalModule(DataParallel):
         stride_rate = 2.0/3.0
         crop_size = self.crop_size
         stride = int(crop_size * stride_rate)
-        with torch.cuda.device_of(image):
-            # scores = image.new().resize_(batch,self.nclass,h,w).zero_().cuda()
-            scores = image.new().resize_(batch,1,h,w).zero_().cuda()  # broadcastable for n_class or d_feature_dim ### torch.Size([1, 1, 360, 480])
+        # Use cached tensor for scores (Phase 1.2 optimization)
+        scores = self._get_cached_tensor((batch, 1, h, w), image.device).fill_(0)
 
         for scale in self.scales:
             long_size = int(math.ceil(self.base_size * scale))
@@ -138,34 +168,11 @@ class MultiEvalModule(DataParallel):
                     pad_img = cur_img
                 _,_,ph,pw = pad_img.size()
                 assert(ph >= height and pw >= width)
-                # grid forward and normalize
-                h_grids = int(math.ceil(1.0 * (ph-crop_size)/stride)) + 1
-                w_grids = int(math.ceil(1.0 * (pw-crop_size)/stride)) + 1
-                with torch.cuda.device_of(image):
-                    # outputs = image.new().resize_(batch,self.nclass,ph,pw).zero_().cuda()
-                    outputs = image.new().resize_(batch,1,ph,pw).zero_().cuda()
-                    count_norm = image.new().resize_(batch,1,ph,pw).zero_().cuda()
-                # grid evaluation
-                for idh in range(h_grids):
-                    for idw in range(w_grids):
-                        h0 = idh * stride
-                        w0 = idw * stride
-                        h1 = min(h0 + crop_size, ph)
-                        w1 = min(w0 + crop_size, pw)
-                        crop_img = crop_image(pad_img, h0, h1, w0, w1)
-                        # pad if needed
-                        pad_crop_img = pad_image(crop_img, self.module.mean,
-                                                 self.module.std, crop_size)
-                        output = module_inference(self.module, pad_crop_img, self.flip, return_feature=return_feature)
-                        # outputs[:,:,h0:h1,w0:w1] += crop_image(output,
-                        #                            0, h1-h0, 0, w1-w0)
-                        if outputs.shape[1] == 1:
-                            outputs = outputs.expand(outputs.shape[0], output.shape[1], outputs.shape[2], outputs.shape[3]).clone()
-                        outputs[:,:,h0:h1,w0:w1] += crop_image(output, 0, h1-h0, 0, w1-w0)
-                        count_norm[:,:,h0:h1,w0:w1] += 1
-                assert((count_norm==0).sum()==0)
-                outputs = outputs / count_norm
-                outputs = outputs[:,:,:height,:width]
+                # Use vectorized grid inference for better performance (Phase 1.3 optimization)
+                outputs = vectorized_grid_inference(
+                    self.module, pad_img, crop_size, stride, self.flip, return_feature
+                )
+                outputs = outputs[:, :, :height, :width]
                 # print("###################################################### else outputs: ", outputs.shape)
 
             # print("######################################################### outputs: ", outputs.shape) # e.g. torch.Size([1, 150, 293, 390]) - depend on scale 
@@ -178,13 +185,109 @@ class MultiEvalModule(DataParallel):
 
 
 def module_inference(module, image, flip=True, return_feature=False):
-    output = module.evaluate(image, return_feature=return_feature)
+    with torch.amp.autocast(device_type="cuda", enabled=image.is_cuda):
+        output = module.evaluate(image, return_feature=return_feature)
     if flip:
         fimg = flip_image(image)
-        foutput = module.evaluate(fimg, return_feature=return_feature)
+        with torch.amp.autocast(device_type="cuda", enabled=fimg.is_cuda):
+            foutput = module.evaluate(fimg, return_feature=return_feature)
         output += flip_image(foutput)
         output = output / 2
     return output
+
+
+def vectorized_grid_inference(module, pad_img, crop_size, stride, flip=True, return_feature=False):
+    """Vectorized grid inference for batch processing (Phase 1.3 optimization)
+
+    Instead of processing each grid crop individually in nested loops,
+    this function collects all crops and processes them in batches.
+
+    Args:
+        module: The model module
+        pad_img: Padded input image [1, C, H, W]
+        crop_size: Size of each grid crop
+        stride: Stride between grid crops
+        flip: Whether to use flip augmentation
+        return_feature: Whether to return features instead of class scores
+
+    Returns:
+        Aggregated output for the entire padded image
+    """
+    batch, channels, ph, pw = pad_img.size()
+
+    # Calculate grid dimensions
+    h_grids = int(math.ceil(1.0 * (ph - crop_size) / stride)) + 1
+    w_grids = int(math.ceil(1.0 * (pw - crop_size) / stride)) + 1
+    total_grids = h_grids * w_grids
+
+    # Collect all grid crops and their positions
+    crops_list = []
+    positions = []
+
+    for idh in range(h_grids):
+        for idw in range(w_grids):
+            h0 = idh * stride
+            w0 = idw * stride
+            h1 = min(h0 + crop_size, ph)
+            w1 = min(w0 + crop_size, pw)
+
+            crop_img = pad_img[:, :, h0:h1, w0:w1]
+            # Pad if needed (for edge crops)
+            if h1 - h0 < crop_size or w1 - w0 < crop_size:
+                crop_img = pad_image(crop_img, module.mean, module.std, crop_size)
+
+            crops_list.append(crop_img)
+            positions.append((h0, h1, w0, w1))
+
+    # Process crops in conservative chunks to avoid CUDA OOM on large scenes.
+    batch_size = min(8, total_grids)
+    accumulated_output = None
+    count_norm = None
+
+    for batch_start in range(0, total_grids, batch_size):
+        batch_end = min(batch_start + batch_size, total_grids)
+        batch_crops = torch.cat([crops_list[i] for i in range(batch_start, batch_end)], dim=0)
+
+        # Batch inference
+        with torch.no_grad():
+            with torch.amp.autocast(device_type="cuda", enabled=batch_crops.is_cuda):
+                batch_outputs = module.evaluate(batch_crops, return_feature=return_feature)
+
+            # Handle flip augmentation
+            if flip:
+                batch_crops_flipped = torch.flip(batch_crops, dims=[-1])
+                with torch.amp.autocast(device_type="cuda", enabled=batch_crops_flipped.is_cuda):
+                    batch_outputs_flipped = module.evaluate(batch_crops_flipped, return_feature=return_feature)
+                batch_outputs_flipped = torch.flip(batch_outputs_flipped, dims=[-1])
+                batch_outputs = (batch_outputs + batch_outputs_flipped) / 2
+
+        # Initialize output tensors on first batch
+        if accumulated_output is None:
+            # batch_outputs shape: [batch_size, num_classes_or_features, crop_h, crop_w]
+            output_channels = batch_outputs.shape[1]
+            accumulated_output = torch.zeros(
+                batch, output_channels, ph, pw,
+                device=pad_img.device, dtype=batch_outputs.dtype
+            )
+            count_norm = torch.zeros(
+                batch, 1, ph, pw,
+                device=pad_img.device, dtype=batch_outputs.dtype
+            )
+
+        # Scatter results back to their positions
+        for i in range(batch_start, batch_end):
+            local_idx = i - batch_start
+            h0, h1, w0, w1 = positions[i]
+            crop_h, crop_w = h1 - h0, w1 - w0
+
+            # Get the output for this crop (accounting for possible padding)
+            crop_output = batch_outputs[local_idx:local_idx+1, :, :crop_h, :crop_w]
+            accumulated_output[:, :, h0:h1, w0:w1] += crop_output
+            count_norm[:, :, h0:h1, w0:w1] += 1
+
+    # Normalize by count
+    assert (count_norm == 0).sum() == 0, "Some pixels were not covered by any grid"
+    return accumulated_output / count_norm.clamp(min=1)
 
 def resize_image(img, h, w, **up_kwargs):
     return F.interpolate(img, (h, w), **up_kwargs)

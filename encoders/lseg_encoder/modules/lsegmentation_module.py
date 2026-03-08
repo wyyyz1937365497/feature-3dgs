@@ -13,16 +13,30 @@ import torchmetrics
 
 from data import get_dataset, get_available_datasets
 
-from encoding.models import get_segmentation_model
-from encoding.nn import SegmentationLosses
+_ENCODING_IMPORT_ERROR = None
+try:
+    from encoding.nn import SegmentationLosses
+    from encoding.utils import batch_pix_accuracy, batch_intersection_union
+    from encoding.utils import SegmentationMetric
+except Exception as exc:
+    _ENCODING_IMPORT_ERROR = exc
+    SegmentationLosses = None
 
-from encoding.utils import batch_pix_accuracy, batch_intersection_union
+    def _missing_encoding(*args, **kwargs):
+        raise RuntimeError(
+            "PyTorch-Encoding is required for training metrics/losses but is unavailable."
+        ) from _ENCODING_IMPORT_ERROR
+
+    batch_pix_accuracy = _missing_encoding
+    batch_intersection_union = _missing_encoding
+
+    class SegmentationMetric:  # type: ignore[no-redef]
+        def __init__(self, *args, **kwargs):
+            _missing_encoding()
 
 # add mixed precision
 import torch.cuda.amp as amp
 import numpy as np
-
-from encoding.utils import SegmentationMetric
 
 class LSegmentationModule(pl.LightningModule):
     def __init__(self, data_path, dataset, batch_size, base_lr, max_epochs, **kwargs):
@@ -321,6 +335,10 @@ class LSegmentationModule(pl.LightningModule):
 
 
     def get_criterion(self, **kwargs):
+        if SegmentationLosses is None:
+            raise RuntimeError(
+                "PyTorch-Encoding is required to build the training criterion."
+            ) from _ENCODING_IMPORT_ERROR
         return SegmentationLosses(
             se_loss=kwargs["se_loss"], 
             aux=kwargs["aux"], 

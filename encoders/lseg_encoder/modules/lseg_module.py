@@ -6,7 +6,8 @@ from argparse import ArgumentParser
 import pytorch_lightning as pl
 from .lsegmentation_module import LSegmentationModule
 from .models.lseg_net import LSegNet
-from encoding.models.sseg.base import up_kwargs
+
+up_kwargs = {"mode": "bilinear", "align_corners": True}
 
 import os
 import clip
