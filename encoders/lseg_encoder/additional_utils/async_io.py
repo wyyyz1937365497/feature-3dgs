@@ -202,18 +202,22 @@ class AsyncIOScheduler:
             # NumPy format
             np.save(path, tensor.cpu().numpy())
         elif suffix == '.npz':
-            # Compressed NumPy format
-            np.savez_compressed(path, tensor.cpu().numpy())
+            # Compressed NumPy format - 保存为 features 键（与加载逻辑匹配）
+            np.savez_compressed(path, features=tensor.cpu().numpy())
         else:
             raise ValueError(f"Unsupported file format: {suffix}")
 
     def _save_numpy(self, array: np.ndarray, path: Path):
-        """Save a numpy array with appropriate format"""
+        """Save a numpy array with appropriate format
+
+        使用 'features' 键保存 npz 文件，与加载逻辑匹配
+        """
         suffix = path.suffix.lower()
 
-        if suffix in ('.npy', '.npz'):
-            save_fn = np.savez_compressed if suffix == '.npz' else np.save
-            save_fn(path, array)
+        if suffix == '.npy':
+            np.save(path, array)
+        elif suffix == '.npz':
+            np.savez_compressed(path, features=array)
         elif suffix == '.pt':
             torch.save(torch.from_numpy(array), path)
         else:

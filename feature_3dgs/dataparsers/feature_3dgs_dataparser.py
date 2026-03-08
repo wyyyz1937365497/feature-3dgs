@@ -298,17 +298,29 @@ class Feature3DGSDataparser(DataParser):
 
         # 提取特征
         for img_path in tqdm(image_filenames, desc="  Extracting LSeg features"):
-            # 官方格式特征文件名：{filename}_fmap_CxHxW.pt
-            feature_path = feature_dir / f"{img_path.stem}_fmap_CxHxW.pt"
+            # 特征文件名：{filename}_fmap_CxHxW.npz (压缩格式)
+            feature_path_npz = feature_dir / f"{img_path.stem}_fmap_CxHxW.npz"
+            feature_path_pt = feature_dir / f"{img_path.stem}_fmap_CxHxW.pt"  # 兼容旧格式
 
-            # 跳过已存在的特征
-            if self.config.skip_existing and feature_path.exists():
-                try:
-                    feature = torch.load(feature_path)
-                    self.semantic_features[str(img_path)] = feature
-                    continue
-                except:
-                    pass
+            # 跳过已存在的特征（支持 npz 和 pt 格式）
+            if self.config.skip_existing:
+                # 优先检查 npz 格式
+                if feature_path_npz.exists():
+                    try:
+                        data = np.load(feature_path_npz)
+                        feature = torch.from_numpy(data['features'])
+                        self.semantic_features[str(img_path)] = feature
+                        continue
+                    except:
+                        pass
+                # 回退到 pt 格式
+                elif feature_path_pt.exists():
+                    try:
+                        feature = torch.load(feature_path)
+                        self.semantic_features[str(img_path)] = feature
+                        continue
+                    except:
+                        pass
 
             try:
                 # 加载图像
@@ -353,8 +365,9 @@ class Feature3DGSDataparser(DataParser):
                 fmap = fmap[0]  # [512, h, w]
                 fmap = fmap.cpu().half()  # 使用 half 精度
 
-                # 保存 - 官方格式
-                torch.save(fmap, feature_path)
+                # 保存为 npz 压缩格式（节省空间）
+                fmap_np = fmap.numpy().astype(np.float16)
+                np.savez_compressed(feature_path_npz, features=fmap_np)
                 self.semantic_features[str(img_path)] = fmap
 
                 # 清理

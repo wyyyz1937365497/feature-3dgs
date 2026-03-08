@@ -621,7 +621,10 @@ def test(args):
             plt.imshow(seg)
             #plt.legend(handles=patches)
             plt.legend(handles=patches, prop={'size': 8}, ncol=4)
-            plt.savefig(os.path.join(outdir, outname + "_legend.png"), format="png", dpi=300, bbox_inches="tight")
+
+            # 异步保存图例图像
+            legend_path = os.path.join(outdir, outname + "_legend.png")
+            plt.savefig(legend_path, format="png", dpi=300, bbox_inches="tight")
             plt.clf()
             plt.close()
 
@@ -630,18 +633,20 @@ def test(args):
             #print(fmap.shape, h, w)
             start = time.time()
             ###
-            # save unnormalized image feature
+            # save unnormalized image feature as compressed npz (节省存储空间)
             unnormalized_fmap = fmap[0]  # [512, h, w]
+            feature_np = unnormalized_fmap.cpu().numpy().astype(np.float16)
+            output_base = os.path.join(outdir, os.path.splitext(impath)[0])
 
             if io_scheduler is not None:
-                # Async save for feature map
+                # Async save for feature map (npz compressed) - 不使用自定义 save_fn，让 async_io 处理
                 io_scheduler.submit_save(
-                    unnormalized_fmap.half(),
-                    os.path.join(outdir, os.path.splitext(impath)[0] + "_fmap_CxHxW.pt")
+                    feature_np,
+                    output_base + "_fmap_CxHxW.npz"
                 )
             else:
-                unnormalized_fmap = unnormalized_fmap.cpu().numpy().astype(np.float16)
-                torch.save(torch.tensor(unnormalized_fmap).half(), os.path.join(outdir, os.path.splitext(impath)[0] + "_fmap_CxHxW.pt"))
+                # Sync save as npz compressed
+                np.savez_compressed(output_base + "_fmap_CxHxW.npz", features=feature_np)
 
             fmap = F.interpolate(fmap, size=(h, w), mode='bilinear', align_corners=False)  # [1, 512, h, w]
             fmap = F.normalize(fmap, dim=1)  # normalize
@@ -663,9 +668,20 @@ def test(args):
                 feature_pca_postprocess_div = (q99 - q1)
                 print(q1, q99)
                 del f_samples
-                torch.save({"pca": pca, "feature_pca_mean": feature_pca_mean, "feature_pca_components": feature_pca_components,
-                            "feature_pca_postprocess_sub": feature_pca_postprocess_sub, "feature_pca_postprocess_div": feature_pca_postprocess_div},
-                           os.path.join(outdir, "pca_dict.pt"))
+                pca_dict = {"pca": pca, "feature_pca_mean": feature_pca_mean, "feature_pca_components": feature_pca_components,
+                            "feature_pca_postprocess_sub": feature_pca_postprocess_sub, "feature_pca_postprocess_div": feature_pca_postprocess_div}
+                pca_path = os.path.join(outdir, "pca_dict.pt")
+
+                # 异步保存PCA参数
+                if io_scheduler is not None:
+                    io_scheduler.submit_save(
+                        pca_dict,
+                        pca_path,
+                        save_fn=lambda data, path: torch.save(data, path)
+                    )
+                else:
+                    torch.save(pca_dict, pca_path)
+
                 # Move PCA parameters to GPU once after initialization
                 feature_pca_mean = feature_pca_mean.to(fmap.device)
                 feature_pca_components = feature_pca_components.to(fmap.device)
@@ -690,22 +706,6 @@ def test(args):
                 Image.fromarray((vis_feature.cpu().numpy() * 255).astype(np.uint8)).save(os.path.join(outdir, outname + "_feature_vis.png"))
             #print(time.time() - start)
             #print("done imgsave")
-
-            fmap = fmap[0]  # [512, h, w]
-            fmap = fmap.cpu().numpy().astype(np.float16)
-            # np.save(os.path.join(outdir, os.path.splitext(impath)[0] + "_fmap__ori_w{}xh{}.npy".format(w, h)), fmap)
-            #print("start savez")
-            #start = time.time()
-            #np.savez_compressed(os.path.join(outdir, os.path.splitext(impath)[0] + "_fmap__ori_w{}xh{}.npz".format(w, h)), fmap)  # 70% filesize
-            #print(time.time() - start)
-            #print("done savez")
-            print("start save")
-            start = time.time()
-            # np.save(os.path.join(outdir, os.path.splitext(impath)[0] + "_fmap__ori_w{}xh{}.npy".format(w, h)), fmap)
-            ###
-            # torch.save(torch.tensor(fmap).half(), os.path.join(outdir, os.path.splitext(impath)[0] + "_fmap_CxHxW.pt"))
-            print(time.time() - start)
-            # print("done save")
 
     # Wait for all async I/O to complete
     if io_scheduler is not None:

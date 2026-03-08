@@ -128,18 +128,30 @@ def extract_lseg_features(
         print(f"[Error] LSeg extraction failed with code {result.returncode}")
         return {}
 
-    # 加载生成的特征（官方格式）
+    # 加载生成的特征（支持 npz 压缩格式和 pt 格式）
     features_dict = {}
     output_dir = Path(output_dir).resolve()
     for img_path in tqdm(image_paths, desc="Loading LSeg features"):
-        # 官方脚本生成 *_fmap_CxHxW.pt 文件
-        feature_path = output_dir / f"{img_path.stem}_fmap_CxHxW.pt"
-        if feature_path.exists():
+        # 优先尝试加载 npz 压缩格式
+        feature_path_npz = output_dir / f"{img_path.stem}_fmap_CxHxW.npz"
+        feature_path_pt = output_dir / f"{img_path.stem}_fmap_CxHxW.pt"
+
+        if feature_path_npz.exists():
+            try:
+                data = np.load(feature_path_npz)
+                features = torch.from_numpy(data['features'])
+                features_dict[str(img_path)] = features
+                continue
+            except Exception as e:
+                print(f"Warning: Failed to load {feature_path_npz}: {e}")
+
+        # 回退到 pt 格式
+        if feature_path_pt.exists():
             try:
                 features = torch.load(feature_path)
                 features_dict[str(img_path)] = features
             except Exception as e:
-                print(f"Warning: Failed to load {feature_path}: {e}")
+                print(f"Warning: Failed to load {feature_path_pt}: {e}")
 
     print(f"Loaded {len(features_dict)} feature files")
     return features_dict

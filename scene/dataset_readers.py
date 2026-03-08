@@ -104,18 +104,29 @@ def readColmapCameras(cam_extrinsics, cam_intrinsics, images_folder, semantic_fe
 
         image_path = os.path.join(images_folder, os.path.basename(extr.name))
         image_name = os.path.basename(image_path).split(".")[0]
-        image = Image.open(image_path) 
+        image = Image.open(image_path)
 
-        
-        semantic_feature_path = os.path.join(semantic_feature_folder, image_name) + '_fmap_CxHxW.pt' 
+
+        # 加载语义特征（优先尝试 npz 压缩格式，回退到 pt 格式）
+        semantic_feature_path_npz = os.path.join(semantic_feature_folder, image_name) + '_fmap_CxHxW.npz'
+        semantic_feature_path_pt = os.path.join(semantic_feature_folder, image_name) + '_fmap_CxHxW.pt'
+
+        if os.path.exists(semantic_feature_path_npz):
+            semantic_feature = torch.from_numpy(np.load(semantic_feature_path_npz)['features'])
+            semantic_feature_path = semantic_feature_path_npz
+        elif os.path.exists(semantic_feature_path_pt):
+            semantic_feature = torch.load(semantic_feature_path_pt)
+            semantic_feature_path = semantic_feature_path_pt
+        else:
+            raise FileNotFoundError(f"Semantic feature not found: {semantic_feature_path_npz} or {semantic_feature_path_pt}")
+
         semantic_feature_name = os.path.basename(semantic_feature_path).split(".")[0]
-        semantic_feature = torch.load(semantic_feature_path) 
 
         cam_info = CameraInfo(uid=uid, R=R, T=T, FovY=FovY, FovX=FovX, image=image,
                               image_path=image_path, image_name=image_name, width=width, height=height,
                               semantic_feature=semantic_feature,
                               semantic_feature_path=semantic_feature_path,
-                              semantic_feature_name=semantic_feature_name) 
+                              semantic_feature_name=semantic_feature_name)
         cam_infos.append(cam_info)
     sys.stdout.write('\n')
     return cam_infos
@@ -239,13 +250,24 @@ def readCamerasFromTransforms(path, transformsfile, white_background, semantic_f
             image = Image.fromarray(np.array(arr*255.0, dtype=np.byte), "RGB")
 
             fovy = focal2fov(fov2focal(fovx, image.size[0]), image.size[1])
-            FovY = fovy 
+            FovY = fovy
             FovX = fovx
 
-            
-            semantic_feature_path = os.path.join(semantic_feature_folder, image_name) + '_fmap_CxHxW.pt' 
+
+            # 加载语义特征（优先尝试 npz 压缩格式，回退到 pt 格式）
+            semantic_feature_path_npz = os.path.join(semantic_feature_folder, image_name) + '_fmap_CxHxW.npz'
+            semantic_feature_path_pt = os.path.join(semantic_feature_folder, image_name) + '_fmap_CxHxW.pt'
+
+            if os.path.exists(semantic_feature_path_npz):
+                semantic_feature = torch.from_numpy(np.load(semantic_feature_path_npz)['features'])
+                semantic_feature_path = semantic_feature_path_npz
+            elif os.path.exists(semantic_feature_path_pt):
+                semantic_feature = torch.load(semantic_feature_path_pt)
+                semantic_feature_path = semantic_feature_path_pt
+            else:
+                raise FileNotFoundError(f"Semantic feature not found: {semantic_feature_path_npz} or {semantic_feature_path_pt}")
+
             semantic_feature_name = os.path.basename(semantic_feature_path).split(".")[0]
-            semantic_feature = torch.load(semantic_feature_path)
             cam_infos.append(CameraInfo(uid=idx, R=R, T=T, FovY=FovY, FovX=FovX, image=image,
                               image_path=image_path, image_name=image_name, width=image.size[0], height=image.size[1],
                               semantic_feature=semantic_feature,
